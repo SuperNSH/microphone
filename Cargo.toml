@@ -1,0 +1,10 @@
+[package]
+name = "nsh-microphone"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Recording to file or stream for voice notes and level meters. Not speech-to-text."
+repository = "https://github.com/SuperNSH/microphone"
+publish = false
+
+[dependencies]
