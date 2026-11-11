@@ -1,11 +1,200 @@
-# Parity
+# Parity with Flutter record, react-native-audio-api and cpal
 
-Status of each planned capability. Every row is **not started** until CI runs a test for it.
+Each row names one API of Flutter's `record` (the names come from `.refs/record`, read on 2026-11-09 at commit `4888b2b`: `record` 7.2.0, `record_platform_interface` 2.1.0), of react-native-audio-api, or of cpal, the status here, and the test that covers it. The `record` sections come first; react-native-audio-api and cpal follow in the sections below.
 
-| Capability | Status | Evidence |
-|---|---|---|
-| Crate builds and CI passes | scaffold | CI run on `master` |
-| Microphone and recording API | not started | none |
-| Platform implementations | not started | none |
-| Device tests | not started | none |
-| Status page | scaffold | `site/index.html` |
+Status words:
+
+- **Authored**: code and a test exist; the repo's CI has not run yet because this task may not commit or push.
+- **Partial**: implemented, with a limit named in the row.
+- **Accepted**: the name is accepted and passed on, but the platform does nothing with it.
+- **Platform only**: the effect exists on a device and no CI runner can show it; the test checks what the library passes on.
+
+**Done** is reserved for after the first green CI run on `master`.
+
+Rust test names are in `crates/nsh-microphone/tests/`. TypeScript tests are in `packages/nsh-microphone/tests/`.
+
+## Methods of `RecordPlatform`
+
+| `record` | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `create(recorderId)` | `Recorder::new()` | `new Recorder()` | Authored. Construction is the create: the platform backend sits behind a `OnceLock`, and there is no `recorderId` — one recorder per handle, clones share the gate | `r_clones_share_one_gate`; "clones share one gate" |
+| `start(recorderId, config, {path})` | `Recorder::start(&RecordConfig, sink)` | `Recorder.start(config, onChunk?)` | Authored. The path lives in `Output::File { path }`, not a parameter. A bad config refuses `ERR_MICROPHONE_INVALID_ARGUMENT` before the gate is claimed; `Undetermined` permission requests once and still-not-granted refuses `ERR_MICROPHONE_PERMISSION_DENIED`; a busy gate refuses `ERR_MICROPHONE_IN_PROGRESS`; an unsupported encoder refuses `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED` | `r_undetermined_permission_is_requested_once_then_start_proceeds`; "the config reaches the backend"; the refusals are named in the edge-case rows below |
+| `startStream(recorderId, config)` | `Recorder::start` with `Output::Stream` | `Recorder.start(config, onChunk?)` with `output: { kind: "stream" }` | Partial. Chunks arrive through the `ChunkSink` / `onChunk` callback, not a returned byte stream, and a paused recording drops them. Over the NSH native bridge (`NativeRecorder`, `rustBackend`) stream output refuses `ERR_MICROPHONE_INVALID_ARGUMENT`: NSH 0.4.0 has no chunk callback | `r_chunks_pause_and_resume_with_the_recording`; "chunks pause and resume with the recording"; the stream refusal is a `native.rs` unit test |
+| `stop(recorderId)` | `Recorder::stop()` -> `StoppedRecording { path, duration_ms }` | `Recorder.stop()` -> `{ path, durationMs }` | Authored. `path` is `None`/`null` for a stream output, where `record` relies on the stream close event. We add `duration_ms`, which `record` does not return | `r_stop_twice_resolves_once_then_invalid_state`; "stop resolves once; a second stop rejects ERR_MICROPHONE_INVALID_STATE" |
+| `pause(recorderId)` | `Recorder::pause()` | `Recorder.pause()` | Authored. Only while recording; anything else refuses `ERR_MICROPHONE_INVALID_STATE`. `record`'s platforms tolerate an out-of-order pause (Android below API 24 does nothing) | `r_pause_and_resume_track_the_state_machine`; `r_pause_when_idle_is_invalid_state` |
+| `resume(recorderId)` | `Recorder::resume()` | `Recorder.resume()` | Authored. Only while paused, else `ERR_MICROPHONE_INVALID_STATE` | `r_pause_and_resume_track_the_state_machine`; `r_resume_when_recording_is_invalid_state` |
+| `isRecording(recorderId)` | `Recorder::is_recording()` | `Recorder.isRecording()` | Authored, one difference: `record` returns `true` while paused too; ours is `true` only while recording, and `state()` / `isPaused()` tell the two apart | `r_pause_and_resume_track_the_state_machine`; "pause and resume track the state machine" |
+| `isPaused(recorderId)` | `Recorder::is_paused()` | `Recorder.isPaused()` | Authored | `r_pause_and_resume_track_the_state_machine`; "pause and resume track the state machine" |
+| `hasPermission(recorderId, {request = true})` | `check_permissions()` / `request_permissions()` | `checkPermissions()` / `requestPermissions()` | Authored. The one call is split in two, and the answer is a `PermissionState` — `granted`, `denied`, `undetermined` (react-native-audio-api's vocabulary; `record` answers a bool). A denial is an answer, not an error; `start` refuses with `ERR_MICROPHONE_PERMISSION_DENIED` | `r_undetermined_permission_is_requested_once_then_start_proceeds`; "undetermined permission is requested once, then start proceeds" |
+| `dispose(recorderId)` | `Recorder::dispose()` | `Recorder.dispose()` | Authored. A live recording is cancelled first, the backend dispose runs once, and every later call answers `ERR_MICROPHONE_NOT_AVAILABLE` | `r_dispose_while_recording_stops_and_later_calls_report_not_available`; "dispose while recording cancels and later calls reject ERR_MICROPHONE_NOT_AVAILABLE" |
+| `getAmplitude(recorderId)` | `Recorder::amplitude()` -> `Amplitude { average, peak }` | `Recorder.amplitude()` | Authored, two differences: ours is normalized `0.0..=1.0`, not dBFS (`record` reports `current`/`max` in dBFS), and a call outside recording/paused refuses `ERR_MICROPHONE_INVALID_STATE` where `record` "always returns zeros on unsupported platforms" | `r_amplitude_when_idle_is_invalid_state`; "amplitude when idle rejects ERR_MICROPHONE_INVALID_STATE" |
+| `onAmplitudeChanged(interval)` (on `AudioRecorder`) | not in the API | not in the API | Partial. Apps poll `amplitude()` on their own timer; NSH 0.4.0 has no event stream for it | the two amplitude tests above cover the single query |
+| `isEncoderSupported(recorderId, encoder)` | `Recorder::is_encoder_supported(encoder)` | `Recorder.isEncoderSupported(encoder)` | Authored. The answer is per platform (next section); the device answer is Platform only | `r_an_unsupported_encoder_is_format_not_supported`; `r_each_encoder_has_the_name_tsx_uses` |
+| `listInputDevices(recorderId)` | `Recorder::list_input_devices()` -> `Vec<InputDevice>` | `Recorder.listInputDevices()` | Partial. We keep `id` and `label`; `record`'s `type` and `sampleRates` fields are not kept. `record` answers an empty list on Android and iOS; ours lists devices there (AudioManager on Android, `availableInputs` on iOS), and macOS answers the single default input | `r_availability_wakes_only_on_change`, through `Availability.has_input_device` |
+| `cancel(recorderId)` | `Recorder::cancel()` | `Recorder.cancel()` | Authored. Discards the output, frees the gate once, and a late backend stop answer after a cancel is dropped. `record` cancels "if needed" and tolerates a cancel when idle; ours refuses `ERR_MICROPHONE_INVALID_STATE` | `r_cancel_when_idle_is_invalid_state`; `r_a_late_stop_answer_after_cancel_is_ignored`; "a late stop answer after cancel is ignored" |
+| `onStateChanged(recorderId)` | `state()`, `is_recording()`, `is_paused()` | `state()`, `isRecording()`, `isPaused()` | Partial. Polling replaces the `RecordState` stream; NSH 0.4.0 has no event channel to TSX | `r_pause_and_resume_track_the_state_machine`; "pause and resume track the state machine" |
+| `setOnConfigChanged(recorderId, handler)` | not in the API | not in the API | Partial. The platform layers capture at the hardware rate and resample to the requested one, so the config is honored rather than adjusted and there is nothing to report | `r_the_config_reaches_the_backend`; "the config reaches the backend" |
+| `getIos(recorderId)` / `RecordIos` | not in the API | not in the API | Partial. There is no iOS-only sub-object; the Apple layer owns the session for iOS and macOS both | none; the session behavior is Platform only |
+| `RecordIos.manageAudioSession(bool)` | not in the API | not in the API | Partial. The Apple layer always manages the session itself; an app cannot take the session over | none |
+| `RecordIos.setAudioSessionActive(bool)` | not in the API | not in the API | Partial. The layer activates a `PlayAndRecord` session on start and deactivates it on stop/cancel | none; Platform only |
+| `RecordIos.setAudioSessionCategory({category, options})` | not in the API | not in the API | Partial. The category is fixed at `playAndRecord`; the options list is not app-configurable | none; Platform only |
+
+## `RecordConfig` fields
+
+| `record` | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `encoder` (default `aacLc`) | `RecordConfig.encoder` (default `Encoder::AacLc`) | `encoder` (default `"aacLc"`) | Authored. Same names on both sides; see the next section | `r_each_encoder_has_the_name_tsx_uses`; "each encoder has the name the Rust crate uses" |
+| `bitRate` (default 128000) | `bit_rate` (default 128000) | `bitRate` (default 128000) | Authored. Zero refuses `ERR_MICROPHONE_INVALID_ARGUMENT` on a compressed encoder. On `wav`/`pcm16bits` the value is accepted and the PCM writer ignores it | `r_start_with_zero_bit_rate_on_a_compressed_encoder_is_invalid_argument`; "zero bit rate on a compressed encoder rejects ERR_MICROPHONE_INVALID_ARGUMENT" |
+| `sampleRate` (default 44100) | `sample_rate` (default 44100) | `sampleRate` (default 44100) | Authored. Zero refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_start_with_zero_sample_rate_is_invalid_argument`; "zero sample rate rejects ERR_MICROPHONE_INVALID_ARGUMENT" |
+| `numChannels` (default 2) | `channels` (default 1) | `channels` (default 1) | Authored. Zero or more than two refuses `ERR_MICROPHONE_INVALID_ARGUMENT`. The default differs: `record` starts stereo, we start mono | `r_start_with_zero_or_three_channels_is_invalid_argument`; "zero or three channels reject ERR_MICROPHONE_INVALID_ARGUMENT" |
+| `path` (a `start` parameter, not a config field) | `Output::File { path }` | `output: { kind: "file", path }` | Authored. The path is part of the config here; a blank path refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_start_with_an_empty_file_path_is_invalid_argument`; "an empty file path rejects ERR_MICROPHONE_INVALID_ARGUMENT" |
+| streaming (`startStream`) | `Output::Stream` (the default) | `output: { kind: "stream" }` (the default) | Partial. Same limit as the `startStream` row: the native TSX bridge refuses it; the Rust crate and the TS memory backend run it | `r_chunks_pause_and_resume_with_the_recording`; "chunks pause and resume with the recording" |
+| `device: InputDevice?` | not in the API | not in the API | Partial. The default input device is always used; v1 cannot pick a device | none; the field does not exist here |
+| `autoGain`, `echoCancel`, `noiseSuppress` | not in the API | not in the API | Partial. `record` itself marks them "may not be considered on all platforms/formats"; no layer here applies them | none |
+| `androidConfig` (`useLegacy`, `muteAudio`, `manageBluetooth`, `audioSource`, `speakerphone`, `audioManagerMode`) | not in the API | not in the API | Partial. The Android layer records PCM through `AudioRecord` with the MIC audio source; the other knobs are not kept | none; the audio-source choice is Platform only |
+| `iosConfig` (`categoryOptions`, `allowHapticsAndSystemSoundsDuringRecording`) | not in the API | not in the API | Partial. The Apple layer sets its own category and options on start | none |
+| `audioInterruption` (default `pause`) | not in the API | not in the API | Partial. Fixed to `record`'s default behavior: an interruption pauses the recording and resume is manual (`AudioInterruptionMode.pause`); `none` and `pauseResume` are not selectable | none; the interruption path is Platform only |
+| `streamBufferSize` | not in the API | not in the API | Partial. Chunk cadence is each platform's own buffering | none |
+
+## `AudioEncoder` values
+
+`is_encoder_supported` answers at runtime; `FakeBackend` and the TS `memoryBackend` script the answer. In v1 every native backend (Apple, Android, Windows, Linux) answers `true` for `wav` and `pcm16bits` only — the layers write PCM16 WAV themselves through `platform::write_wav` — and `false` for every compressed encoder, which `start` then refuses with `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED`. The file bytes a device produces are Platform only.
+
+| `record` | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `aacLc` (MPEG-4 container; `record`'s default) | `Encoder::AacLc` (the default) | `"aacLc"` (the default) | Authored. No native backend encodes it in v1; the answer is `false` and `start` refuses | `r_each_encoder_has_the_name_tsx_uses`; `r_an_unsupported_encoder_is_format_not_supported` |
+| `aacEld` (MPEG-4 container) | `Encoder::AacEld` | `"aacEld"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `aacHe` (MPEG-4 container) | `Encoder::AacHe` | `"aacHe"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `amrNb` (8 kHz; 3GP container on Android) | `Encoder::AmrNb` | `"amrNb"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `amrWb` (16 kHz; 3GP container on Android) | `Encoder::AmrWb` | `"amrWb"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `opus` (OGG container; Android SDK 29+, iOS 11+) | `Encoder::Opus` | `"opus"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `flac` | `Encoder::Flac` | `"flac"` | Authored, same v1 answer as `aacLc` | same two tests |
+| `wav` (PCM16 with headers) | `Encoder::Wav` | `"wav"` | Authored. Supported on every native platform through `write_wav`; the file bytes are Platform only | `r_each_encoder_has_the_name_tsx_uses`; `r_the_config_reaches_the_backend` |
+| `pcm16bits` (headerless PCM16) | `Encoder::Pcm16bits` | `"pcm16bits"` | Authored, with a container difference: file output goes through the same WAV writer, so the samples land behind a 44-byte WAV header rather than `record`'s headerless file; stream chunks are the raw i16 samples | `r_each_encoder_has_the_name_tsx_uses`; `r_the_config_reaches_the_backend` |
+| not in `record` 7.2.0 (removed in 5.0.0, "too few underlying support") | `Encoder::Vorbis` | `"vorbis"` | Accepted. The historic name is kept, and every backend answers `false` | `r_each_encoder_has_the_name_tsx_uses` |
+
+## Failure mapping
+
+`record` surfaces failures as `PlatformException` through the method channel (4.x releases wrapped them in a `RecordException`); the codes are platform-specific strings with no taxonomy of their own, and a denied permission is a `false` answer from `hasPermission`, not an exception. This library codes every failure with a stable `ERR_MICROPHONE_*` string — apps match on codes, in Rust and TypeScript alike — keeps the platform's numeric status in `RecorderError::status()` where the host gives one, and the TS side parses a `CODE: message` host rejection back into the code. The mapping lives in the platform layers (`crates/nsh-microphone/src/platform/*.rs`) and both error modules (`crates/nsh-microphone/src/error.rs`, `packages/nsh-microphone/src/errors.ts`).
+
+| `record` failure | Code here | Status | Covered by |
+|---|---|---|---|
+| A denied permission (`hasPermission` answers `false`; the platform's refusal) | `ERR_MICROPHONE_PERMISSION_DENIED` | Authored | `r_denied_permission_is_permission_denied`; "denied permission rejects ERR_MICROPHONE_PERMISSION_DENIED" |
+| A dismissed permission prompt | `ERR_MICROPHONE_CANCELLED` | Authored | `r_a_cancelled_permission_prompt_reports_cancelled`; "a cancelled permission prompt rejects ERR_MICROPHONE_CANCELLED" |
+| A start while a recording runs | `ERR_MICROPHONE_IN_PROGRESS` | Authored. Refused at the gate before the backend is touched | `r_start_while_recording_is_refused_with_in_progress`; "start while recording rejects with ERR_MICROPHONE_IN_PROGRESS" |
+| A call in the wrong state (pause, resume, stop, cancel or amplitude when idle) | `ERR_MICROPHONE_INVALID_STATE` | Authored. `record` leaves this behavior to each platform | `r_pause_when_idle_is_invalid_state`; `r_stop_when_idle_is_invalid_state`; their TS twins |
+| An unsupported encoder (`record` throws when the encoder is not supported) | `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED` | Authored. Refused before `start` reaches the backend | `r_an_unsupported_encoder_is_format_not_supported`; "an unsupported encoder rejects ERR_MICROPHONE_FORMAT_NOT_SUPPORTED" |
+| A bad config (zero sample rate, zero or three channels, blank path, zero bit rate on a compressed encoder) | `ERR_MICROPHONE_INVALID_ARGUMENT` | Authored. Refused before the gate is claimed | the four `r_start_with_*` edge tests; their TS twins |
+| No input device, or the recorder cannot be created (`cpal`'s `DeviceNotAvailable` on desktop) | `ERR_MICROPHONE_NOT_AVAILABLE` | Authored. Also the web target's answer for everything | `r_every_kind_reports_its_stable_code`; `r_dispose_while_recording_stops_and_later_calls_report_not_available`; "every code carries its message" |
+| Any other platform error (an engine failure mid-recording, an I/O failure writing the file, a JNI exception, an `osstatus`) | `ERR_MICROPHONE_BACKEND` | Authored, with the platform's numeric status kept where the host gives one | `r_a_backend_error_keeps_its_code_and_status`; `r_a_platform_status_travels_with_its_error`; "a backend error keeps its code"; "asRecorderError maps a host rejection's code prefix" |
+
+Codes `record` has no counterpart for: `ERR_MICROPHONE_CANCELLED`, `ERR_MICROPHONE_INVALID_STATE`, `ERR_MICROPHONE_INVALID_ARGUMENT`, `ERR_MICROPHONE_NOT_AVAILABLE` (also the web target's answer) and `ERR_MICROPHONE_BACKEND` name failures `record` leaves as uncoded platform strings.
+
+## `AudioRecorder` methods
+
+The react-native-audio-api names were read from `.refs/react-native-audio-api` on 2026-11-09 at commit `96afff5` (package 1.1.0): the class in `src/core/AudioRecorder.ts`, the types in `src/types.ts`, the permission and device surface in `src/system/AudioManager.ts`. Their `AudioRecorder` is a Web-Audio-style object — constructed with capture options, file output enabled separately, streaming callbacks registered as events, the recorder pluggable into an audio graph through an adapter node. Ours is one recorder whose `start` takes the whole config and a chunk sink. Rows marked **Absent** name a reference member this library deliberately does not carry; the row says why.
+
+| react-native-audio-api | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `new AudioRecorder(options?)` | `Recorder::new()` | `new Recorder()` | Authored. The constructor takes no config; ours takes it per `start`. Their `options` are two preprocessing switches with no counterpart here (next section) | `r_clones_share_one_gate`; "clones share one gate" |
+| `start(): Promise<Result<{}>>` | `Recorder::start(&RecordConfig, sink)` | `Recorder.start(config, onChunk?)` | Authored. Their `start` takes no arguments and resolves `{ status: 'success' }` or `{ status: 'error', message }`; ours passes the whole config, delivers chunks through the sink, and fails with a coded `RecorderError`. An unsupported format they let fail at native start is refused up front with `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED`; a second start is `ERR_MICROPHONE_IN_PROGRESS` | `r_start_while_recording_is_refused_with_in_progress`; "start while recording rejects with ERR_MICROPHONE_IN_PROGRESS"; `r_an_unsupported_encoder_is_format_not_supported` |
+| `stop(): Promise<Result<FileInfo>>` | `Recorder::stop()` -> `StoppedRecording { path, duration_ms }` | `Recorder.stop()` -> `{ path, durationMs }` | Partial. `FileInfo` is `{ paths: string[], size (MB), duration (seconds) }`; ours answers one path (no rotation, so no array), no file size, and milliseconds not seconds | `r_stop_twice_resolves_once_then_invalid_state`; "stop resolves once; a second stop rejects ERR_MICROPHONE_INVALID_STATE" |
+| `pause(): Promise<void>`, `resume(): Promise<void>` | `Recorder::pause()`, `Recorder::resume()` | `Recorder.pause()`, `Recorder.resume()` | Authored. Same two-state machine; theirs is documented for file recording and leaves an out-of-order call to the native side, ours refuses `ERR_MICROPHONE_INVALID_STATE` | `r_pause_and_resume_track_the_state_machine`; `r_pause_when_idle_is_invalid_state`; their TS twins |
+| `isRecording(): boolean`, `isPaused(): boolean` | `is_recording()`, `is_paused()` | `isRecording()`, `isPaused()` | Authored. Same split: recording and paused are two states, `isRecording` is false while paused | `r_pause_and_resume_track_the_state_machine`; "pause and resume track the state machine" |
+| `enableFileOutput(options?)` — throws `NotSupportedError` on refusal | `Output::File { path }` in the config passed to `start` | `output: { kind: "file", path }` | Partial. File output is a choice in the start config, not a mode enabled ahead of it, and it cannot be switched mid-recording. An unencodable format is refused at `start` with `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED`, not thrown from an enable call | `r_an_unsupported_encoder_is_format_not_supported`; "an unsupported encoder rejects ERR_MICROPHONE_FORMAT_NOT_SUPPORTED" |
+| `options` getter, `disableFileOutput(): Promise<void>` | not in the API | not in the API | Absent, deliberately: there is no file-output mode to query or disable; file or stream is chosen per `start`, and their mid-recording finalize is our `stop()` | none |
+| `connect(context, destination)`, `disconnect()` — the adapter node | not in the API | not in the API | Absent, deliberately: this library records into a chunk sink; it is not an audio-node graph, so there is nothing for the recorder to plug into | none |
+| `onAudioReady(options, callback)`, `clearOnAudioReady()` | the `ChunkSink` passed to `Recorder::start` | the `onChunk` callback passed to `Recorder.start` | Partial. Their registration negotiates `sampleRate`, `bufferLength` and `channelCount` and can be swapped or cleared mid-recording; ours fixes the chunk shape in the start config and the sink at `start`, and a paused recording drops chunks rather than queueing them. Chunks are i16 frames (`AudioChunk`), not their float `AudioBuffer` with `numFrames` and a `when` timestamp | `r_chunks_pause_and_resume_with_the_recording`; "chunks pause and resume with the recording"; `r_the_config_reaches_the_backend` |
+| `onError(callback)`, `clearOnError()` — the `recorderError` event, `{ message }` | every call answers `Result<_, RecorderError>` | every call rejects with a coded `RecorderError` | Partial. There is no error event (NSH 0.4.0 has no event channel); a mid-stream failure surfaces on the next call — the desktop layers stop delivery and report it from `amplitude()` and `stop()` | `r_a_backend_error_keeps_its_code_and_status`; "a backend error keeps its code" |
+| `getCurrentDuration(): number` — seconds, live during recording | `StoppedRecording.duration_ms`, answered by `stop()` | `durationMs`, answered by `stop()` | Partial, and the limit is exact: a duration exists only when the recording stops, in milliseconds; there is no live query. A stream output computes it from the frames delivered, a file output from what was written | `r_stop_twice_resolves_once_then_invalid_state`; "stop resolves once; a second stop rejects ERR_MICROPHONE_INVALID_STATE" |
+| `get inputLatency: number` | not in the API | not in the API | Absent, stated plainly: this library exposes no capture latency and no layer measures one | none |
+| `static isRecordingOngoing(): boolean` | `is_recording()` / `is_paused()`, per handle | `isRecording()` / `isPaused()`, per handle | Partial. Theirs is a process-wide static, true while any recorder records or pauses; ours is per recorder handle with the two states reported separately | `r_pause_and_resume_track_the_state_machine`; "pause and resume track the state machine" |
+| `static consumeLastRecordingResult(): FileInfo \| null` | not in the API | not in the API | Absent, deliberately: there is no cached last result to consume; `stop()` resolves exactly once with the result and everything after is `ERR_MICROPHONE_INVALID_STATE` | `r_stop_twice_resolves_once_then_invalid_state` |
+
+## `AudioRecorderOptions` and file options
+
+react-native-audio-api splits the configuration three ways: constructor options (preprocessing switches), `AudioRecorderFileOptions` (the file, defaulted by `withDefaultFileOptions`), and `AudioRecorderCallbackOptions` (the streaming callback, all three fields required). Ours is one `RecordConfig` taken by `start`. One thing matches in kind: in their API file output and the streaming callback are independent — a recorder can write a file and deliver `onAudioReady` buffers in one session — and ours is the same, `Output::File` and the sink both work in one `start` (over the NSH native bridge the stream half is refused; see the `startStream` row above).
+
+| react-native-audio-api | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `androidInputPreset` (constructor; Oboe `InputPreset`, platform default `voiceRecognition`, which applies no AEC/NS) | not in the API | not in the API | Absent, deliberately: the Android layer records the raw microphone through the MIC audio source with no preset switch — the raw signal their default also gives | none; Platform only |
+| `iosVoiceProcessing` (constructor; Apple voice-processing I/O, default `false`) | not in the API | not in the API | Absent, deliberately: the Apple layer keeps the raw signal; voice processing cannot be switched on, which is their default | none; Platform only |
+| `preset.sampleRate` (file options; the `High` preset default is 48000) and `AudioRecorderCallbackOptions.sampleRate` | `RecordConfig.sample_rate` (default 44100) | `sampleRate` (default 44100) | Authored. One field serves both of their roles — the file's rate and the callback buffers' rate. Their file rate is capped at 48000 by the system encoders; ours has no cap because v1 writes WAV, and the layers resample from the hardware rate to whatever is asked. Zero refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_the_config_reaches_the_backend`; "the config reaches the backend"; `r_start_with_zero_sample_rate_is_invalid_argument` |
+| `preset.bitRate` (file options; `High` 192000, `Medium` 128000) | `RecordConfig.bit_rate` (default 128000) | `bitRate` (default 128000) | Authored. Every native backend writes PCM in v1, so no encoder consumes the value; zero on a compressed encoder still refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_start_with_zero_bit_rate_on_a_compressed_encoder_is_invalid_argument`; its TS twin |
+| `channelCount` (file options, default 2; also required in the callback options) | `RecordConfig.channels` (default 1) | `channels` (default 1) | Authored. The default differs: their file default is stereo, ours is mono. Zero or more than two refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_start_with_zero_or_three_channels_is_invalid_argument`; its TS twin |
+| `format: FileFormat` (default `M4A`) | `RecordConfig.encoder` (default `Encoder::AacLc`) | `encoder` (default `"aacLc"`) | Authored. Both default to AAC — a codec profile here, a container there; the value mapping is the next section | `r_each_encoder_has_the_name_tsx_uses`; "each encoder has the name the Rust crate uses" |
+| `directory` (`Document` 0 / `Cache` 1, default `Cache`), `subDirectory` (default `'AudioAPI'`), `fileName` (bare name, no extension, no separators; `recording_<timestamp>` generated when unset) | `Output::File { path }` — one complete path | `output: { kind: "file", path }` | Partial. Ours takes a flat path with the extension in it: no directory enum, no subdirectory, no generated name, and their no-separators rules are the app's to keep. A blank path refuses `ERR_MICROPHONE_INVALID_ARGUMENT` | `r_start_with_an_empty_file_path_is_invalid_argument`; its TS twin |
+| `rotateIntervalBytes` (segments `_001`, `_002`, …, joined by `concatAudioFiles`) | not in the API | not in the API | Absent, deliberately: one recording is one file and `stop` answers one path; there is no rotation and no concatenation | none |
+| `preset.bitDepth`, `preset.iosQuality`, `preset.flacCompressionLevel` | not in the API | not in the API | Absent, deliberately: the only sample format is 16-bit PCM written as WAV; the system-encoder quality knobs do not apply | none |
+| `androidFlushIntervalMs` (default 500) | not in the API | not in the API | Partial. Chunk cadence is each platform's own buffering — cpal's device default, the engine tap cadence, `AudioRecord`'s minimum buffer — and is not configurable | none |
+| `AudioRecorderCallbackOptions.bufferLength` (required) | not in the API | not in the API | Partial, same limit: the chunk size follows the platform's buffer, not a requested length | `r_chunks_pause_and_resume_with_the_recording`; its TS twin |
+
+## `FileFormat` values
+
+Their own comment on the enum: "Support is platform-dependent; unsupported formats fail when recording starts." Same shape here, asked up front: `is_encoder_supported` answers at runtime and `start` refuses `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED` on a false. In v1 every native backend answers `true` for `wav` and `pcm16bits` only. Their enum names containers; ours names codecs — the rows say which of their containers each of our names covers.
+
+| react-native-audio-api | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `Wav` | `Encoder::Wav` | `"wav"` | Authored. Supported everywhere through `write_wav`; the file bytes themselves are Platform only | `r_each_encoder_has_the_name_tsx_uses`; `r_the_config_reaches_the_backend` |
+| `M4A` (the default; AAC in an MP4 container) | `Encoder::AacLc` | `"aacLc"` | Authored. The codec matches and the container is lost: no native backend encodes it in v1, so the answer is `false`. `aacEld` and `aacHe` name profiles their single M4A bucket never distinguishes — no preset field or format value selects one, and the system encoder maps M4A to AAC-LC unconditionally (`kAudioFormatMPEG4AAC` in `IOSEncoder.mm`) | `r_each_encoder_has_the_name_tsx_uses`; `r_an_unsupported_encoder_is_format_not_supported` |
+| `Adts` (AAC in ADTS) | `Encoder::AacLc` | `"aacLc"` | Authored, same codec and same v1 answer; ADTS is a streaming AAC container this side does not write | the same two tests |
+| `OpusOgg` | `Encoder::Opus` | `"opus"` | Authored. Codec matches, OGG container not written in v1, answer `false` | the same two tests |
+| `OpusWebm` | `Encoder::Opus` | `"opus"` | Authored. Same codec; the WebM container is not distinguished on this side, answer `false` | the same two tests |
+| `VorbisWebm` | `Encoder::Vorbis` | `"vorbis"` | Accepted. The historic name is kept (`record` removed it in 5.0.0); every backend answers `false` | `r_each_encoder_has_the_name_tsx_uses` |
+| `Flac` | `Encoder::Flac` | `"flac"` | Authored. The name maps; no backend encodes FLAC in v1, answer `false` | the same two tests |
+| `Caf`, `Aiff`, `Alac` | none | none | Absent, deliberately: no Apple-interchange or lossless containers are carried in the encoder set | none |
+| `Ulaw`, `Alaw` | none | none | Absent, deliberately: no companded telephony formats | none |
+| no counterpart (their PCM choice is `Wav` only) | `Encoder::Pcm16bits` | `"pcm16bits"` | Authored. Headerless PCM16 exists for stream chunks; file output still writes it behind a WAV header | `r_each_encoder_has_the_name_tsx_uses` |
+
+## Permission surface
+
+Their permissions hang on a global `AudioManager` (which also owns sessions, device selection and notification permissions): `checkRecordingPermissions()` and `requestRecordingPermissions()` answer `Promise<PermissionStatus>` with the strings `'Granted'`, `'Denied'`, `'Undetermined'`. We adopt that vocabulary — `PermissionState::name()` answers `"granted"`, `"denied"`, `"undetermined"`, lowercased like every TS union here — and hang the two calls on the recorder itself.
+
+| react-native-audio-api | Rust | TypeScript | Status | Covered by |
+|---|---|---|---|---|
+| `AudioManager.checkRecordingPermissions(): Promise<PermissionStatus>` | `Recorder::check_permissions()` -> `PermissionState` | `Recorder.checkPermissions()` | Authored. A denial is an answer, not an error; `start` refuses `ERR_MICROPHONE_PERMISSION_DENIED` when the state is not `Granted` after one request | `r_undetermined_permission_is_requested_once_then_start_proceeds`; "undetermined permission is requested once, then start proceeds" |
+| `AudioManager.requestRecordingPermissions(): Promise<PermissionStatus>` | `Recorder::request_permissions()` | `Recorder.requestPermissions()` | Authored. A dismissed prompt is `ERR_MICROPHONE_CANCELLED`, a case their string set has no word for | `r_a_cancelled_permission_prompt_reports_cancelled`; "a cancelled permission prompt rejects ERR_MICROPHONE_CANCELLED" |
+| `'Undetermined' / 'Denied' / 'Granted'` | `PermissionState::Undetermined / Denied / Granted`; `name()` lowercased | `"undetermined" / "denied" / "granted"` | Authored. The same three words on both sides; capitalization is the only difference | `r_denied_permission_is_permission_denied`; "denied permission rejects ERR_MICROPHONE_PERMISSION_DENIED" |
+| `AudioManager.getDevicesInfo(): availableInputs` (`AudioDeviceInfo` = `id`, `name`, `category`) | `Recorder::list_input_devices()` -> `InputDevice { id, label }` | `Recorder.listInputDevices()` | Partial. We keep `id` and `label` only; their `category` and the current-inputs lists are not kept, and macOS answers the single default input | `r_availability_wakes_only_on_change`, through `Availability.has_input_device` |
+| `AudioManager.setInputDevice(id \| 'default')` — switches input mid-recording | not in the API | not in the API | Absent, deliberately: the default input is always used; v1 cannot pick or switch an input | none |
+| `requestNotificationPermissions()` / `checkNotificationPermissions()` | not in the API | not in the API | Absent: notifications are not this library's business | none |
+
+## Errors and events
+
+Their recorder failures arrive three ways, none of them coded: `start` and `stop` resolve the `Result<T>` envelope with `{ status: 'error', message }`; `enableFileOutput` throws `NotSupportedError` (`'AudioRecorder.enableFileOutput failed: ' + message`); mid-recording failures come as `recorderError` events carrying `{ message }`. Their error classes (`AudioApiError` subclasses such as `InvalidStateError`, `NotSupportedError`) mirror Web Audio's DOMException names; on the recorder only `enableFileOutput` throws one. The session layer is the one coded place: `AudioManager` parses numeric native statuses (AVAudioSession codes like 561145187 `CannotStartRecording`) into a `SessionActivationError` carrying `nativeErrorInfo`. Ours codes every failure with a stable `ERR_MICROPHONE_*` string, keeps the host's number in `status()` where there is one, and the TS side parses a `CODE: message` host rejection back into the code.
+
+| react-native-audio-api failure | Code here | Status | Covered by |
+|---|---|---|---|
+| `{ status: 'error', message }` from `start` / `stop` | `ERR_MICROPHONE_BACKEND` for an engine failure, or the specific code below when the cause is known | Authored. The message-only envelope becomes a coded `RecorderError` | `r_a_backend_error_keeps_its_code_and_status`; "a backend error keeps its code" |
+| `NotSupportedError`: the platform cannot encode the format | `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED` | Authored, refused at `start` before the backend is touched | `r_an_unsupported_encoder_is_format_not_supported`; its TS twin |
+| `NotSupportedError`: invalid file options (a sample rate above 48000, a bad `fileName`) | `ERR_MICROPHONE_INVALID_ARGUMENT` | Partial. Our refusals of this kind are the zero-and-blank checks; there is no 48000 cap, because v1 writes WAV rather than system-encoded files | `r_start_with_zero_sample_rate_is_invalid_argument`; `r_start_with_an_empty_file_path_is_invalid_argument` |
+| `NotSupportedError`: a recording session is active | `ERR_MICROPHONE_IN_PROGRESS` | Authored, refused at the gate | `r_start_while_recording_is_refused_with_in_progress`; its TS twin |
+| the `recorderError` event mid-recording | `ERR_MICROPHONE_BACKEND`, surfaced on the next call | Partial. No event channel; the desktop layers stop delivery and report the failure from `amplitude()` and `stop()`. A revoked permission that yields silence instead of an error is what the amplitude meters expose (Platform only) | `r_a_backend_error_keeps_its_code_and_status`; "a backend error keeps its code" |
+| a permission string `'Denied'` | `ERR_MICROPHONE_PERMISSION_DENIED` (from `start`) | Authored | `r_denied_permission_is_permission_denied`; its TS twin |
+| a numeric native status (an AVAudioSession code, a JNI exception code) | `ERR_MICROPHONE_BACKEND` with the number in `status()` | Authored; the Apple and Android paths that carry one are Platform only on CI runners | `r_a_platform_status_travels_with_its_error`; "asRecorderError maps a host rejection's code prefix" |
+
+## cpal as the desktop layers use it
+
+The crate depends on cpal 0.18.2; every name in this section was verified against docs.rs 0.18.2 on 2026-11-09. The `.refs/cpal` checkout (commit `5eadda5`) is 0.19.0-dev and carries the same single `Error`/`ErrorKind` model minus `Xrun`. cpal 0.18 replaced the per-call error enums older documentation names (`BuildStreamError`, `StreamError`, `PauseStreamError`) with one `Error` exposing `kind()` and `message()`, so those names do not exist at 0.18.2 and the mapping below uses the real ones. The TypeScript side never sees cpal: it sees the mapped code through the bridge. `windows.rs` and `linux.rs` are the layers that use cpal; macOS does not — the Apple layer owns the session and interruption story cpal lacks.
+
+| cpal 0.18.2 | Rust here | Status | Covered by |
+|---|---|---|---|
+| `Host::default_input_device() -> Option<Device>` (on `cpal::default_host()`) | `NativeBackend::start` takes it; `None` answers `ERR_MICROPHONE_NOT_AVAILABLE` | Authored code; the device answer is Platform only | `r_the_config_reaches_the_backend`; its TS twin |
+| `Device::default_input_config() -> SupportedStreamConfig` | The stream opens on the device's own format — its rate, channels, sample format — and the layer converts to i16 and linearly resamples to `RecordConfig.sample_rate`, so no configured rate or channel count is out of range at the host | Platform only | the same pair |
+| `Device::build_input_stream::<T, D, E>(config, data_callback, error_callback, timeout: Option<Duration>)` — the 0.18 signature, `timeout` last | Both layers pass `Some(Duration::from_secs(2))` so the build cannot hang — `None` would wait indefinitely. The contrast between them is the sample type: Windows builds an f32 stream, Linux builds the device's own sample format and converts each buffer to f32. The data callback delivers to the sink after the lock is released; the error callback records the failure | Platform only | the same pair |
+| `Stream::play()`, `Stream::pause()` — 0.18 names resume `play`, and a built stream delivers nothing until played | `start` plays right after building; `pause` and `resume` map straight through to the two calls | Platform only | the same pair |
+| `Host::input_devices()` | `list_input_devices`; the device's display name is both `id` and `label` (stable ids would need extra crates) | Platform only | `r_availability_wakes_only_on_change`, through `Availability.has_input_device` |
+| `StreamConfig` (taken from `SupportedStreamConfig::config()`) | Built from the device default, never from the app's config; the app's rate and channels are applied in software afterwards | Platform only | `r_the_config_reaches_the_backend` |
+
+The error mapping, `cpal::ErrorKind` to our codes, in both desktop layers:
+
+| cpal 0.18.2 kind | Code here | Status | Covered by |
+|---|---|---|---|
+| `DeviceNotAvailable` | `ERR_MICROPHONE_NOT_AVAILABLE` | Authored code; Platform only on CI runners | `r_a_backend_error_keeps_its_code_and_status`; its TS twin |
+| `HostUnavailable` | `ERR_MICROPHONE_NOT_AVAILABLE` on Linux (no sound server means no devices), `ERR_MICROPHONE_BACKEND` on Windows | Authored; the divergence is deliberate per layer | the same pair |
+| `PermissionDenied` | `ERR_MICROPHONE_PERMISSION_DENIED` | Authored; Platform only | the same pair |
+| `UnsupportedConfig` | `ERR_MICROPHONE_FORMAT_NOT_SUPPORTED` | Authored; Platform only | `r_an_unsupported_encoder_is_format_not_supported`; its TS twin |
+| `InvalidInput` | `ERR_MICROPHONE_INVALID_ARGUMENT` | Authored; Platform only | the same pair |
+| `DeviceBusy`, `DeviceChanged`, `RealtimeDenied`, `ResourceExhausted`, `StreamInvalidated`, `UnsupportedOperation`, `Xrun`, `BackendError`, `Other` | `ERR_MICROPHONE_BACKEND` | Authored; Platform only. The kind mapping is `ERR_MICROPHONE_BACKEND` in both layers; the error callbacks drop non-fatal notices first (Windows: xruns and the host's messageless device-change notices; Linux: xruns) and any other recorded failure stops delivery, with the next `amplitude()`/`stop()` answering `ERR_MICROPHONE_BACKEND` (a `DeviceChanged` reroute therefore ends delivery here even though the cpal stream itself stays alive) | the same pair |
+
+cpal 0.18's `Error` carries `kind()` and `message()` and no number, so `status()` stays `None` from cpal failures; the number-preserving path is Apple (an `osstatus`) and Android (a JNI exception code), both Platform only on CI runners.

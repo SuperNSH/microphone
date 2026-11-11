@@ -1,0 +1,35 @@
+[package]
+name = "nsh-microphone"
+description = "Recording to file or stream for Native Shell apps: voice notes and level meters. Not speech-to-text."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "nsh_microphone"
+path = "src/lib.rs"
+
+[dependencies]
+nsh-core = "0.4.0"
+thiserror = "2"
+tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
+
+# cpal is only compiled where a desktop host uses it; macOS uses the Apple native layer.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+cpal = "0.18.2"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { version = "0.6", features = ["std"] }
+block2 = { version = "0.6", features = ["std"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "alloc", "AVAudioApplication", "AVAudioBuffer", "AVAudioEngine", "AVAudioFile", "AVAudioFormat", "AVAudioIONode", "AVAudioMixing", "AVAudioNode", "AVAudioSession", "AVAudioSessionRoute", "AVAudioSessionTypes", "AVAudioSettings", "AVAudioTypes", "AVAudioTime"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+ndk-context = "0.1.1"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "time"] }
+nsh-engine = { version = "0.4.0", default-features = false }
+nsh-testing = { version = "0.4.0", default-features = false }
