@@ -4,9 +4,9 @@ Each entry says what was chosen and why. `docs/parity.md` lists what each API do
 
 ## Decided
 
-### NSH 0.4.0
+### NSH 0.5.0
 
-The build targets NSH 0.4.0, the release `nsh-biometrics` pins and the one CI installs (`NSH_VERSION: v0.4.0` from SuperNSH/nsh-builds). The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. `.refs/nsh` carries the `v0.4.0` tag, so the build read the exact published sources; that repository's HEAD is not 0.4.0 and was never used as an API reference.
+The build targets NSH 0.5.0, the release CI installs (`NSH_VERSION: v0.5.0` from SuperNSH/nsh-builds). It moved from 0.4.0 on 2026-11-12 with no source change. The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. API names are read from the published `v0.5.0` sources; NSH's HEAD is not 0.5.0 and is never used as an API reference.
 
 ### cpal on Windows and Linux, the AVAudioEngine tap on every Apple target
 
