@@ -1,5 +1,8 @@
 //! The reactive availability read on `Headless`: it wakes only on change, and checks again on foreground.
 
+// nsh-testing exports `Headless` only off wasm32, so this test cannot exist there.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::{
     sync::{
         Mutex, OnceLock, PoisonError,

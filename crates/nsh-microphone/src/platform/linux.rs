@@ -151,9 +151,10 @@ struct Active {
     path: Option<String>,
 }
 
+// Boxed: the stream makes `Active` large, and the idle states should not pay for it.
 enum Phase {
     Idle,
-    Active(Active),
+    Active(Box<Active>),
     Disposed,
 }
 
@@ -289,7 +290,7 @@ fn finish(discard: bool) -> Result<StoppedRecording, RecorderError> {
     } = {
         let mut guard = lock_shared();
         match std::mem::replace(&mut guard.phase, Phase::Idle) {
-            Phase::Active(active) => active,
+            Phase::Active(active) => *active,
             // Disposed stays disposed: the swap above was only a peek at the phase.
             Phase::Disposed => {
                 guard.phase = Phase::Disposed;
@@ -424,12 +425,12 @@ impl Backend for NativeBackend {
             capture.clone(),
             native.sample_format(),
         )?;
-        guard.phase = Phase::Active(Active {
+        guard.phase = Phase::Active(Box::new(Active {
             stream,
             capture,
             config: config.clone(),
             path,
-        });
+        }));
         Ok(())
     }
 

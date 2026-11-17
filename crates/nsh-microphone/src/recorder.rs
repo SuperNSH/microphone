@@ -244,7 +244,7 @@ impl Recorder {
     /// answers `InvalidState`.
     pub fn pause(&self) -> Result<(), RecorderError> {
         let generation = {
-            let mut gate = self.shared.gate();
+            let gate = self.shared.gate();
             if gate.disposed {
                 return Err(RecorderError::new(ErrorKind::NotAvailable));
             }
@@ -270,7 +270,7 @@ impl Recorder {
     /// Resumes a paused recording. Any other state answers `InvalidState`.
     pub fn resume(&self) -> Result<(), RecorderError> {
         let generation = {
-            let mut gate = self.shared.gate();
+            let gate = self.shared.gate();
             if gate.disposed {
                 return Err(RecorderError::new(ErrorKind::NotAvailable));
             }
@@ -284,10 +284,11 @@ impl Recorder {
         };
         self.shared.backend.resume()?;
         let mut gate = self.shared.gate();
-        if let Some(active) = gate.recording.as_mut() {
-            if active.generation == generation && active.paused {
-                active.paused = false;
-            }
+        if let Some(active) = gate.recording.as_mut()
+            && active.generation == generation
+            && active.paused
+        {
+            active.paused = false;
         }
         Ok(())
     }
@@ -465,6 +466,6 @@ fn config_refusal(config: &RecordConfig) -> Option<RecorderError> {
 }
 
 /// The answer every call on a disposed handle gets.
-fn unavailable<T>() -> BackendFuture<'static, Result<T, RecorderError>> {
+fn unavailable<T: 'static>() -> BackendFuture<'static, Result<T, RecorderError>> {
     Box::pin(ready(Err(RecorderError::new(ErrorKind::NotAvailable))))
 }

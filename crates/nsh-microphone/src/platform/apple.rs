@@ -233,12 +233,10 @@ fn activate_session() -> Result<(), RecorderError> {
         // None means the symbol never linked, so no session work can happen on this build.
         None => return Err(RecorderError::new(ErrorKind::Backend)),
     };
-    unsafe { session.setCategory_error(category) }.map_err(|error| {
-        RecorderError::new(ErrorKind::Backend).with_status(i64::from(error.code()))
-    })?;
-    unsafe { session.setActive_error(true) }.map_err(|error| {
-        RecorderError::new(ErrorKind::Backend).with_status(i64::from(error.code()))
-    })?;
+    unsafe { session.setCategory_error(category) }
+        .map_err(|error| RecorderError::new(ErrorKind::Backend).with_status(error.code() as i64))?;
+    unsafe { session.setActive_error(true) }
+        .map_err(|error| RecorderError::new(ErrorKind::Backend).with_status(error.code() as i64))?;
     Ok(())
 }
 
@@ -292,9 +290,8 @@ fn build_graph(tap: &Arc<Mutex<TapData>>) -> Result<Graph, RecorderError> {
     install_tap(&node, &format, tap.clone());
     // The OS status (an NSError code) rides along; NSError's type is never named because
     // this crate does not depend on objc2-foundation directly.
-    unsafe { engine.startAndReturnError() }.map_err(|error| {
-        RecorderError::new(ErrorKind::Backend).with_status(i64::from(error.code()))
-    })?;
+    unsafe { engine.startAndReturnError() }
+        .map_err(|error| RecorderError::new(ErrorKind::Backend).with_status(error.code() as i64))?;
     Ok(Graph { engine, node })
 }
 
@@ -444,9 +441,8 @@ fn on_route_change() {
         unsafe { active.graph.engine.stop() };
         let tap = active.tap.clone();
         match build_graph(&tap) {
-            Ok(graph) => {
-                std::mem::replace(&mut active.graph, graph);
-            }
+            // Assigning drops the stopped engine's graph.
+            Ok(graph) => active.graph = graph,
             Err(_) => {
                 active
                     .tap
@@ -538,14 +534,19 @@ impl Backend for NativeBackend {
             #[cfg(not(target_os = "macos"))]
             {
                 let (sender, receiver) = oneshot::channel::<PermissionState>();
+                // The block must be `Fn` and the send consumes the sender, so it is taken once.
+                let sender = Mutex::new(Some(sender));
                 let block = RcBlock::new(move |granted: Bool| {
                     let state = if bool::from(granted) {
                         PermissionState::Granted
                     } else {
                         PermissionState::Denied
                     };
+                    let taken = sender.lock().unwrap_or_else(PoisonError::into_inner).take();
                     // oneshot send never blocks, so the handler returns fast on any queue.
-                    let _ = sender.send(state);
+                    if let Some(sender) = taken {
+                        let _ = sender.send(state);
+                    }
                 });
                 let session = unsafe { AVAudioSession::sharedInstance() };
                 // iOS calls the handler exactly once, immediately when permission is decided.

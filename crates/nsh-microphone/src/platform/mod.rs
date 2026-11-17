@@ -60,7 +60,7 @@ pub(crate) fn write_wav(
     sample_rate: u32,
     channels: u16,
     samples: &[i16],
-) -> Result<StoppedRecording, RecorderError> {
+) -> Result<crate::options::StoppedRecording, crate::error::RecorderError> {
     use std::{
         fs::File,
         io::{BufWriter, Write},
@@ -90,7 +90,7 @@ pub(crate) fn write_wav(
     header.extend_from_slice(&16u16.to_le_bytes()); // bits per sample.
     header.extend_from_slice(b"data");
     header.extend_from_slice(&data_len.to_le_bytes());
-    let mut data = Vec::with_capacity(usize::from(data_len));
+    let mut data = Vec::with_capacity(samples.len().saturating_mul(2));
     for sample in samples {
         data.extend_from_slice(&sample.to_le_bytes());
     }

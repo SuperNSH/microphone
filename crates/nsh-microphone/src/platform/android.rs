@@ -216,14 +216,15 @@ fn dispatched<R: Send + 'static>(
         if spawned.is_err() {
             return Err(RecorderError::new(ErrorKind::Backend));
         }
+        // A lost thread drops the sender; that answers Backend like a failed spawn.
         listening
             .await
-            .map_err(|_| RecorderError::new(ErrorKind::Backend))
+            .unwrap_or_else(|_| Err(RecorderError::new(ErrorKind::Backend)))
     })
 }
 
 /// The application `Context` `ndk-context` carries; the pointer is a global ref it owns.
-fn app_context(env: &mut Env<'_>) -> Result<JObject<'_>, RecorderError> {
+fn app_context<'local>(env: &mut Env<'local>) -> Result<JObject<'local>, RecorderError> {
     let context = ndk_context::android_context().context();
     if context.is_null() {
         return Err(RecorderError::new(ErrorKind::Backend));
@@ -263,7 +264,7 @@ fn system_service<'local>(
 
 /// The resumed activity, walked out of `ActivityThread`'s private record of them — the same
 /// hidden API robius walks for biometric prompts. `None` on any failure; callers degrade, not fail.
-fn current_activity(env: &mut Env<'_>) -> Option<JObject<'_>> {
+fn current_activity<'local>(env: &mut Env<'local>) -> Option<JObject<'local>> {
     let walked = (|| {
         let thread = env
             .call_static_method(
@@ -471,7 +472,7 @@ fn device_label(env: &mut Env<'_>, device: &JObject<'_>) -> Result<Option<String
             &[],
         )?
         .l()?;
-    let text: JString = env.cast_local(text)?;
+    let text = env.cast_local::<JString>(text)?;
     Ok(Some(text.try_to_string(env)?))
 }
 
@@ -849,7 +850,8 @@ fn reader_thread(
     shared: Arc<Shared>,
     answered: mpsc::Sender<Result<(), RecorderError>>,
 ) {
-    let answer = attached(move |env| record(env, &config, &sink, &shared, &answered));
+    let reader = Arc::clone(&shared);
+    let answer = attached(move |env| record(env, &config, &sink, &reader, &answered));
     if let Err(failure) = answer {
         fail(&shared, failure);
     }
@@ -858,7 +860,7 @@ fn reader_thread(
 
 /// Signals the reader, waits bounded for it, and joins it; `Err` means it never finished and stays
 /// detached to release the `AudioRecord` whenever it does.
-fn end(handle: &JoinHandle<()>, shared: &Shared) -> Result<(), RecorderError> {
+fn end(handle: JoinHandle<()>, shared: &Shared) -> Result<(), RecorderError> {
     shared.stop.store(true, Ordering::Relaxed);
     let began = Instant::now();
     while !shared.done.load(Ordering::Relaxed) {
@@ -938,13 +940,13 @@ impl Backend for NativeBackend {
                 Ok(())
             }
             Ok(Err(error)) => {
-                let _ = end(&handle, &shared);
+                let _ = end(handle, &shared);
                 Err(error)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Construction never answered; the flag retires the thread whenever it does.
                 shared.stop.store(true, Ordering::Relaxed);
-                let _ = end(&handle, &shared);
+                let _ = end(handle, &shared);
                 Err(RecorderError::new(ErrorKind::Backend))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -998,7 +1000,7 @@ impl Backend for NativeBackend {
             let Some(recording) = recording else {
                 return Err(RecorderError::new(ErrorKind::InvalidState));
             };
-            end(&recording.handle, &recording.shared)?;
+            end(recording.handle, &recording.shared)?;
             if let Some(failure) = failure_of(&recording.shared) {
                 return Err(failure);
             }
@@ -1029,7 +1031,7 @@ impl Backend for NativeBackend {
             let Some(recording) = recording else {
                 return Err(RecorderError::new(ErrorKind::InvalidState));
             };
-            end(&recording.handle, &recording.shared)?;
+            end(recording.handle, &recording.shared)?;
             // The output is discarded, so a reader failure ends it and still resolves clean.
             Ok(())
         })
@@ -1038,7 +1040,7 @@ impl Backend for NativeBackend {
     fn dispose(&self) -> BackendFuture<'_, Result<(), RecorderError>> {
         dispatched(|_env| {
             if let Some(recording) = lock(&RECORDING).take() {
-                end(&recording.handle, &recording.shared)?;
+                end(recording.handle, &recording.shared)?;
             }
             Ok(())
         })

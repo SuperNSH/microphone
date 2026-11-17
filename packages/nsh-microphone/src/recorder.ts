@@ -5,10 +5,13 @@ import { rustBackend } from "./rust";
 
 export type RecordingState = "idle" | "recording" | "paused";
 
+/** A config with every default filled in, as `start` hands it to the backend. */
+type ResolvedConfig = Required<RecordConfig>;
+
 type StopOutcome = { ok: true; recording: StoppedRecording } | { ok: false; error: RecorderError };
 
 /** Fills the defaults of a partial config, the twin of the Rust `RecordConfig::default()`. */
-function resolveConfig(config: RecordConfig): RecordConfig {
+function resolveConfig(config: RecordConfig): ResolvedConfig {
   return {
     sampleRate: config.sampleRate ?? 44100,
     channels: config.channels ?? 1,
@@ -19,7 +22,7 @@ function resolveConfig(config: RecordConfig): RecordConfig {
 }
 
 /** The Rust crate's refusals, in its order: rate, channels, bit rate, then the file path. */
-function configRefusal(config: RecordConfig): RecorderErrorCode | null {
+function configRefusal(config: ResolvedConfig): RecorderErrorCode | null {
   if (config.sampleRate === 0) return "ERR_MICROPHONE_INVALID_ARGUMENT";
   if (config.channels === 0 || config.channels > 2) return "ERR_MICROPHONE_INVALID_ARGUMENT";
   if (config.bitRate === 0 && config.encoder !== "pcm16bits" && config.encoder !== "wav") {

@@ -18,7 +18,7 @@ function nativeConfig(config: RecordConfig): NativeRecordConfig {
   if (config.channels !== undefined) native.channels = config.channels;
   if (config.bitRate !== undefined) native.bitRate = config.bitRate;
   if (config.encoder !== undefined) native.encoder = config.encoder;
-  if (config.output.kind === "file") native.path = config.output.path;
+  if (config.output?.kind === "file") native.path = config.output.path;
   return native;
 }
 
@@ -47,17 +47,19 @@ class RustBackend implements RecorderBackend {
   start(config: RecordConfig, _sink: ChunkSink): Promise<void> {
     return this.settle(async () => {
       // Stream output over the Rust bridge is not wired in NSH 0.4.0; only a file crosses it.
-      if (config.output.kind === "stream") throw recorderError("ERR_MICROPHONE_INVALID_ARGUMENT");
+      // An absent output is the default stream, as `RecordConfig` documents.
+      if ((config.output?.kind ?? "stream") === "stream") throw recorderError("ERR_MICROPHONE_INVALID_ARGUMENT");
       await this.native.start(nativeConfig(config));
     });
   }
 
   pause(): Promise<void> {
-    return this.settle(() => this.native.pause());
+    // The native pause and resume answer synchronously; a refusal throws.
+    return this.settle(async () => this.native.pause());
   }
 
   resume(): Promise<void> {
-    return this.settle(() => this.native.resume());
+    return this.settle(async () => this.native.resume());
   }
 
   amplitude(): Promise<Amplitude> {
@@ -65,7 +67,10 @@ class RustBackend implements RecorderBackend {
   }
 
   stop(): Promise<StoppedRecording> {
-    return this.settle(() => this.native.stop());
+    return this.settle(async () => {
+      const stopped = await this.native.stop();
+      return { path: stopped.path ?? null, durationMs: stopped.durationMs ?? null };
+    });
   }
 
   cancel(): Promise<void> {
