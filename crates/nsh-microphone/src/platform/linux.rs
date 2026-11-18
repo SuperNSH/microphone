@@ -236,7 +236,7 @@ fn open_stream<T>(
     to_float: fn(T) -> f32,
 ) -> Result<Stream, RecorderError>
 where
-    T: cpal::SizedSample,
+    T: cpal::SizedSample + 'static,
 {
     let failure = capture.clone();
     let stream = device
