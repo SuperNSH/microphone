@@ -4,7 +4,7 @@ nsh-microphone records audio to a file or an in-memory stream for Native Shell a
 
 The reference behavior cited below was read from the checkouts in `.refs/` on 2026-11-09: Flutter `record` (`record/lib/src/record.dart` and `record_platform_interface`), `react-native-audio-api` (`core/AudioRecorder.ts`, `types.ts`, `system/types.ts`), and `cpal` (local master is 0.19.0; the pinned dependency is 0.18.2, whose published `Error`/`ErrorKind` surface and `Stream::pause`/`play` were verified on docs.rs).
 
-Nothing here is Done. Every test named is Authored: the code and the test exist, and the repo's CI has not run because this task may not commit or push (AGENTS.md: GitHub Actions compiles and tests everything). The criteria below state what CI will prove; `docs/parity.md` flips its rows to Done after the first green run.
+Verified by CI run https://github.com/SuperNSH/microphone/actions/runs/44381766793: every job passed (format; rust on ubuntu, macos, windows; cross-check for iOS, iOS simulator, Android, wasm; typescript). Every test named below ran in the `rust` and `typescript` jobs. Platform layers are compiled and linted there, not run on devices.
 
 Rust test names are in `crates/nsh-microphone/tests/`. TypeScript tests are in `packages/nsh-microphone/tests/`.
 
@@ -35,7 +35,7 @@ CI jobs (authored in `.github/workflows/ci.yml`): `format` (rustfmt check); `rus
 | The availability hook checks at start, refreshes on demand, and reports a failed check with its code | `rust` + `typescript` | `r_availability_wakes_only_on_change` | "availability checks at start and refreshes on demand"; "availability reports a failed check with its code" in `availability.test.tsx` |
 | The platform layers compile for their targets (Apple, Android, wasm) | `cross-check` clippy per target | no host tests; behavior is Platform only | none |
 | Both trees are format-clean and warning-free | `format`; `typescript` build with no warnings | — | — |
-| Every behaviour ships a test in both languages; status claims match CI (AGENTS.md) | these tables; claims stay Authored until the named job passes | — | — |
+| Every behaviour ships a test in both languages; status claims match CI (AGENTS.md) | these tables; claims are Done only for jobs that passed in the run above | — | — |
 
 ## Error model
 
@@ -86,7 +86,7 @@ The mapping happens in the platform layers (`src/platform/*`), which put the pla
 | Call interruptions stop the tap; restart is explicit (Platform only) | record defaults `AudioInterruptionMode.pause` on Android and iOS; the Apple layer pauses the input tap on the AVAudioSession interruption notification, and restarting is an explicit `resume()` | `r_pause_and_resume_track_the_state_machine` | "pause and resume track the state machine" (`recorder.test.tsx`) |
 | Sample-rate mismatch: capture at the hardware rate, resample (Platform only) | record lets the platform adjust the config and reports it; react-native-audio-api warns that delivered values vary by device. Every native layer captures at the hardware rate and linearly resamples to `config.sample_rate`, documented per platform file | `r_the_config_reaches_the_backend` | "the config reaches the backend" (`edge_cases.test.tsx`) |
 | Android 14+ microphone foreground-service type (Platform only) | an app manifest requirement (`android:foregroundServiceType="microphone"`); record's own manifest declares only `RECORD_AUDIO`. The library cannot grant it; stated in `src/platform/android.rs` | `r_the_config_reaches_the_backend` | "the config reaches the backend" (`edge_cases.test.tsx`) |
-| Revoked permission yields silence, not an error (Platform only) | the brief's rule (`docs/brief.md`): a revoked permission can yield silence, not an error — detect and report; the references document nothing either way. The layers watch the amplitude path and report a sustained zero level instead of nothing | none beyond the platform layers' pass-through | none beyond the platform layers' pass-through |
+| Revoked permission yields silence, not an error (Platform only) | the brief's rule (`docs/brief.md`): a revoked permission can yield silence, not an error — detect and report; the references document nothing either way. The layers watch the amplitude path and expose the zero level through the meters; no layer detects or reports it as an error (not implemented, needs a device) | none beyond the platform layers' pass-through | none beyond the platform layers' pass-through |
 
 ## Out of scope
 

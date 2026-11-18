@@ -32,9 +32,9 @@ NSH 0.4.0 has no verified bridge for streaming chunks from a Rust backend into T
 
 `nsh-biometrics` ships `examples/demo` and the CI jobs that package, release and deploy it. This repo omits the demo deliberately: its extra is the static status page in `site/`, published by `.github/workflows/pages.yml`. ci.yml therefore stops at compile and test; pages.yml publishes the status page.
 
-### Gates: authored into CI, not run in this task
+### Gates: run in CI only
 
-AGENTS.md forbids building or testing on a developer machine, so the local gates of this build were pure formatting and parse checks: `rustfmt --check` on each area's Rust files, a YAML load of `.github/workflows/ci.yml`, and `cargo fmt --all -- --check` over the joined tree. Clippy, `cargo test`, and `nsh check`/`nsh build`/`nsh test` are authored into `.github/workflows/ci.yml`. The task also forbade commits and pushes, so no CI run has happened; every status claim in this repo stays Authored until the first green run on `master`.
+AGENTS.md forbids building or testing on a developer machine, so every gate runs in `.github/workflows/ci.yml`. Run https://github.com/SuperNSH/microphone/actions/runs/44381766793 on master passed all of them. The typescript job installs `libasound2-dev` because `nsh` compiles the crate on Linux and links ALSA.
 
 ### The five references (STEP 0)
 

@@ -6,7 +6,7 @@ Part of the Native Shell (NSH) capability set. Same layout as the other SuperNSH
 
 ## Status
 
-**Authored: implemented; not yet verified by CI.** The crate and package are implemented and the CI workflow compiles and tests them; the first green run on master flips docs/parity.md rows to Done.
+**Verified by CI.** Run https://github.com/SuperNSH/microphone/actions/runs/44381766793 passed every job on master: format, rust (Linux, macOS, Windows), cross-check (iOS, iOS simulator, Android, wasm) and typescript. The platform layers are compiled and linted there but not run on devices. Not implemented: detecting a revoked permission that yields silence (see docs/parity.md).
 
 ## Approach
 
