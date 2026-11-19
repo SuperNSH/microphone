@@ -24,6 +24,8 @@ function nativeConfig(config: RecordConfig): NativeRecordConfig {
 
 class RustBackend implements RecorderBackend {
   private readonly native = new NativeRecorder();
+  /** Ends the chunk listener of the running stream recording, when there is one. */
+  private stopChunks: (() => void) | null = null;
 
   checkPermissions(): Promise<PermissionState> {
     return this.settle(async () => (await this.native.checkPermissions()) as PermissionState);
@@ -44,12 +46,21 @@ class RustBackend implements RecorderBackend {
     return this.settle(() => this.native.isEncoderSupported(encoder));
   }
 
-  start(config: RecordConfig, _sink: ChunkSink): Promise<void> {
+  start(config: RecordConfig, sink: ChunkSink): Promise<void> {
     return this.settle(async () => {
-      // Stream output over the Rust bridge is not wired in NSH 0.4.0; only a file crosses it.
+      this.endChunks();
       // An absent output is the default stream, as `RecordConfig` documents.
-      if ((config.output?.kind ?? "stream") === "stream") throw recorderError("ERR_MICROPHONE_INVALID_ARGUMENT");
-      await this.native.start(nativeConfig(config));
+      if ((config.output?.kind ?? "stream") === "stream") {
+        this.stopChunks = this.native.onChunk((chunk) =>
+          sink({ data: Int16Array.from(chunk.data), sampleRate: chunk.sampleRate, channels: chunk.channels }),
+        );
+      }
+      try {
+        await this.native.start(nativeConfig(config));
+      } catch (error) {
+        this.endChunks();
+        throw error;
+      }
     });
   }
 
@@ -69,17 +80,36 @@ class RustBackend implements RecorderBackend {
   stop(): Promise<StoppedRecording> {
     return this.settle(async () => {
       const stopped = await this.native.stop();
+      this.endChunks();
       return { path: stopped.path ?? null, durationMs: stopped.durationMs ?? null };
     });
   }
 
   cancel(): Promise<void> {
-    return this.settle(() => this.native.cancel());
+    return this.settle(async () => {
+      try {
+        await this.native.cancel();
+      } finally {
+        this.endChunks();
+      }
+    });
   }
 
   dispose(): Promise<void> {
     // The native class names it `release`: nsh-core reserves `dispose` for freeing the value.
-    return this.settle(() => this.native.release());
+    return this.settle(async () => {
+      try {
+        await this.native.release();
+      } finally {
+        this.endChunks();
+      }
+    });
+  }
+
+  private endChunks(): void {
+    const stop = this.stopChunks;
+    this.stopChunks = null;
+    stop?.();
   }
 
   private async settle<T>(operation: () => Promise<T>): Promise<T> {

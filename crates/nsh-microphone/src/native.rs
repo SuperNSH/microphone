@@ -1,14 +1,15 @@
 //! The recorder as TSX sees it: `NativeRecorder`, a class whose async members reject with a
 //! `code` on failure. Results are plain values; the gate and the platform stay on the Rust side.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nsh_core::prelude::*;
+use tokio::sync::mpsc;
 
 use crate::{
     backend::ChunkSink,
     error::{ErrorKind, RecorderError},
-    options::{Encoder, Output, RecordConfig},
+    options::{AudioChunk, Encoder, Output, RecordConfig},
     recorder::Recorder,
 };
 
@@ -23,7 +24,7 @@ pub struct NativeRecordConfig {
     pub bit_rate: Option<u32>,
     /// The encoder, as TSX names it (`"aacLc"`); the default is `"aacLc"`.
     pub encoder: Option<String>,
-    /// The file to write. Absent means a stream output, which this surface refuses.
+    /// The file to write. Absent means a stream output: chunks reach the `onChunk` listener.
     pub path: Option<String>,
 }
 
@@ -45,6 +46,17 @@ pub struct NativeAmplitude {
     pub peak: f32,
 }
 
+/// One buffer of a stream recording.
+#[derive(JsObject, Clone, Debug)]
+pub struct NativeAudioChunk {
+    /// The interleaved 16-bit samples.
+    pub data: Vec<i16>,
+    /// The sample rate this buffer was captured at.
+    pub sample_rate: u32,
+    /// How many interleaved channels this buffer carries.
+    pub channels: u16,
+}
+
 /// What a stopped recording left behind.
 #[derive(JsObject, Clone, Debug)]
 pub struct NativeStoppedRecording {
@@ -54,10 +66,14 @@ pub struct NativeStoppedRecording {
     pub duration_ms: Option<u64>,
 }
 
+/// Where a handle's stream chunks go: the channel `on_chunk` opened, or nowhere.
+type ChunkSlot = Arc<Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>>;
+
 /// A recording handle. Create one and keep it; every handle shares the platform's recording gate.
 #[class]
 pub struct NativeRecorder {
     recorder: Recorder,
+    chunks: ChunkSlot,
 }
 
 #[class]
@@ -66,6 +82,7 @@ impl NativeRecorder {
     pub fn new() -> NativeRecorder {
         NativeRecorder {
             recorder: Recorder::new(),
+            chunks: ChunkSlot::default(),
         }
     }
 
@@ -113,17 +130,40 @@ impl NativeRecorder {
             .map_err(into_js)
     }
 
-    /// Starts one recording to `config.path`'s file; a config without a path (a stream output)
-    /// answers `ERR_MICROPHONE_INVALID_ARGUMENT`: chunks are not wired in NSH 0.4.0.
+    /// Starts one recording: to `config.path`'s file, or, without a path, as a stream whose
+    /// chunks reach the listener `onChunk` set (a stream with no listener drops them).
     pub async fn start(
         this: Instance<Self>,
         config: Option<NativeRecordConfig>,
     ) -> Result<(), JsError> {
-        let recorder = this.with(|native| native.recorder.clone());
+        let (recorder, chunks) =
+            this.with(|native| (native.recorder.clone(), native.chunks.clone()));
         let config = to_record_config(config.unwrap_or_default())?;
-        // The platform layer writes the file; a stream consumer is what this surface lacks.
-        let sink: ChunkSink = Arc::new(|_| {});
-        recorder.start(&config, sink).await.map_err(into_js)
+        recorder
+            .start(&config, chunk_sink(chunks))
+            .await
+            .map_err(into_js)
+    }
+
+    /// Calls `listener` with each chunk of the stream recordings this handle starts, replacing
+    /// any earlier listener of the handle. The returned function ends it, and so does the end of
+    /// what called it (a component).
+    pub fn on_chunk(
+        &self,
+        #[args(chunk)] listener: Callback<NativeAudioChunk>,
+        cx: CallCx<'_>,
+    ) -> Stop {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mine = sender.clone();
+        *lock(&self.chunks) = Some(sender);
+        // The sink is Send and fires from the platform's thread; the callback runs on the engine.
+        cx.start(async move {
+            while let Some(chunk) = receiver.recv().await {
+                listener.post(to_native_chunk(chunk));
+            }
+        });
+        let chunks = Arc::clone(&self.chunks);
+        Stop::new(move || clear_chunks(&chunks, &mine))
     }
 
     /// Pauses the running recording; any other state answers `ERR_MICROPHONE_INVALID_STATE`.
@@ -176,6 +216,41 @@ impl Default for NativeRecorder {
     }
 }
 
+fn lock(chunks: &ChunkSlot) -> MutexGuard<'_, Option<mpsc::UnboundedSender<AudioChunk>>> {
+    chunks.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The sink a stream start hands the recorder: each chunk goes to the handle's listener, or is
+/// dropped when it has none.
+fn chunk_sink(chunks: ChunkSlot) -> ChunkSink {
+    Arc::new(move |chunk| {
+        if let Some(sender) = lock(&chunks).as_ref() {
+            // A closed channel means the listener ended; its chunks have nowhere to go.
+            let _ = sender.send(chunk);
+        }
+    })
+}
+
+/// Ends the listener whose channel `mine` is. A listener set since replaced this one, and its
+/// channel stays.
+fn clear_chunks(chunks: &ChunkSlot, mine: &mpsc::UnboundedSender<AudioChunk>) {
+    let mut slot = lock(chunks);
+    if slot
+        .as_ref()
+        .is_some_and(|current| current.same_channel(mine))
+    {
+        *slot = None;
+    }
+}
+
+fn to_native_chunk(chunk: AudioChunk) -> NativeAudioChunk {
+    NativeAudioChunk {
+        data: chunk.data,
+        sample_rate: chunk.sample_rate,
+        channels: chunk.channels,
+    }
+}
+
 /// The error a rejection carries: its message, and the `code` apps match on.
 fn into_js(error: RecorderError) -> JsError {
     JsError::Error(error.kind().message().to_owned()).with_code(error.code())
@@ -205,13 +280,8 @@ fn encoder_from_name(name: &str) -> Option<Encoder> {
 }
 
 /// Turns the TSX config into the crate's. Unset fields keep `RecordConfig::default()`'s; a
-/// missing `path` means a stream output, which this surface refuses (see `docs/parity.md`).
+/// missing `path` means a stream output.
 fn to_record_config(config: NativeRecordConfig) -> Result<RecordConfig, JsError> {
-    let Some(path) = config.path else {
-        return Err(invalid(
-            "The native surface records to a file: pass a path (see docs/parity.md).",
-        ));
-    };
     let defaults = RecordConfig::default();
     let encoder = match config.encoder.as_deref() {
         None => defaults.encoder,
@@ -224,7 +294,9 @@ fn to_record_config(config: NativeRecordConfig) -> Result<RecordConfig, JsError>
         channels: config.channels.unwrap_or(defaults.channels),
         bit_rate: config.bit_rate.unwrap_or(defaults.bit_rate),
         encoder,
-        output: Output::File { path },
+        output: config
+            .path
+            .map_or(Output::Stream, |path| Output::File { path }),
     })
 }
 
@@ -263,12 +335,60 @@ mod tests {
     }
 
     #[test]
-    fn a_start_with_a_stream_output_is_refused() {
-        let refused = to_record_config(NativeRecordConfig::default()).err();
-        assert_eq!(
-            refused.as_ref().and_then(|error| error.code()),
-            Some("ERR_MICROPHONE_INVALID_ARGUMENT")
-        );
+    fn a_config_without_a_path_streams() {
+        let config = to_record_config(NativeRecordConfig::default()).ok();
+        assert_eq!(config, Some(RecordConfig::default()));
+        assert_eq!(config.map(|config| config.output), Some(Output::Stream));
+    }
+
+    fn chunk(first: i16) -> AudioChunk {
+        AudioChunk {
+            data: vec![first, first + 1],
+            sample_rate: 16_000,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn the_sink_hands_chunks_to_the_listener_in_order_and_drops_them_without_one() {
+        let chunks = ChunkSlot::default();
+        let sink = chunk_sink(Arc::clone(&chunks));
+        // No listener yet: the chunk is dropped, not queued for a later one.
+        sink(chunk(0));
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *lock(&chunks) = Some(sender);
+        sink(chunk(1));
+        sink(chunk(3));
+        assert_eq!(receiver.try_recv().ok(), Some(chunk(1)));
+        assert_eq!(receiver.try_recv().ok(), Some(chunk(3)));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn ending_a_listener_does_not_end_the_one_that_replaced_it() {
+        let chunks = ChunkSlot::default();
+        let (first, _first_receiver) = mpsc::unbounded_channel();
+        let first_mine = first.clone();
+        *lock(&chunks) = Some(first);
+        let (second, mut second_receiver) = mpsc::unbounded_channel();
+        let second_mine = second.clone();
+        *lock(&chunks) = Some(second);
+
+        clear_chunks(&chunks, &first_mine);
+        chunk_sink(Arc::clone(&chunks))(chunk(5));
+        assert_eq!(second_receiver.try_recv().ok(), Some(chunk(5)));
+
+        clear_chunks(&chunks, &second_mine);
+        assert!(lock(&chunks).is_none());
+    }
+
+    #[test]
+    fn a_chunk_keeps_its_samples_rate_and_channels() {
+        let native = to_native_chunk(chunk(7));
+        assert_eq!(native.data, vec![7, 8]);
+        assert_eq!(native.sample_rate, 16_000);
+        assert_eq!(native.channels, 1);
     }
 
     #[test]
