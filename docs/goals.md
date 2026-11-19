@@ -93,4 +93,3 @@ The mapping happens in the platform layers (`src/platform/*`), which put the pla
 - Speech-to-text. This library records audio; transcription is another library's job (the crate description says so).
 - Device and emulator runs in CI. AGENTS.md forbids building or testing on developer machines, and CI has no devices; device behavior stays manual for maintainers (the Platform only rows above).
 - Demo app. `examples/demo` and a package `App.tsx` are deliberately omitted; this repo's extra is the `site/` status page, recorded in `docs/decisions.md`.
-- Streaming over the native Rust-TSX bridge in NSH 0.4.0. The NSH surface is file-output-only: `NativeRecorder.start` refuses a stream output with `ERR_MICROPHONE_INVALID_ARGUMENT`, and `rust.ts` refuses it on the TypeScript side. Chunk streaming is authored over `FakeBackend` (Rust) and `memoryBackend` (TypeScript); `docs/parity.md` documents the gap.

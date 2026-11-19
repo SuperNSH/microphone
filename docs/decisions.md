@@ -6,7 +6,7 @@ Each entry says what was chosen and why. `docs/parity.md` lists what each API do
 
 ### NSH 0.6.0
 
-The build targets NSH 0.6.0, the release CI installs (`NSH_VERSION: v0.6.0` from SuperNSH/nsh-builds). It moved from 0.4.0 on 2026-11-12 with no source change, and to 0.5.1, a bug-fix release with no API changes, on 2026-11-17, and to 0.6.0 on 2026-11-18. The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. API names are read from the published `v0.5.0` sources, which 0.5.1 leaves unchanged; NSH's HEAD is not 0.5.0 and is never used as an API reference.
+The build targets NSH 0.6.0, the release CI installs (`NSH_VERSION: v0.6.0` from SuperNSH/nsh-builds). It moved from 0.4.0 on 2026-11-12 with no source change, and to 0.5.1, a bug-fix release with no API changes, on 2026-11-17, and to 0.6.0 on 2026-11-18. The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. API names are read from the published `v0.6.0` sources; NSH's HEAD is never used as an API reference.
 
 ### cpal on Windows and Linux, the AVAudioEngine tap on every Apple target
 
@@ -24,9 +24,15 @@ Eight error kinds, each with a stable `ERR_MICROPHONE_*` code and one message, w
 
 Stream output is delivered as `AudioChunk`s through the `ChunkSink` handed to `start` (`onChunk` in TypeScript). A paused recording drops chunks instead of queuing them, so a resumed recording continues from live audio and memory stays flat over a long pause.
 
-### The native TSX surface records to files only
+### The native TSX surface streams through a callback
 
-NSH 0.4.0 has no verified bridge for streaming chunks from a Rust backend into TSX, so `NativeRecorder.start` refuses a stream output with `ERR_MICROPHONE_INVALID_ARGUMENT`. The surface stays file-output-only until a verified chunk callback exists in an NSH release. The Rust `Recorder` streams through any `Backend`, and the TypeScript `Recorder` streams through a custom backend; only the surface over the compiled crate is limited. Marked Partial in `docs/parity.md`.
+NSH 0.6.0 lets a crate keep a TSX function as a `Callback<T>` and call it from another thread with `post` (the platform sink sends each chunk over a channel, and a task started with `CallCx::start` posts it on the engine thread); the `Stop` a listening call returns ends it. `NativeRecorder.onChunk` is built on that: `rustBackend` sets it before a stream `start` and ends it after `stop`, `cancel` and `dispose`. The samples cross as a number array, copied into an `Int16Array`; a `Vec<u8>` would be smaller, but this is the form that needs no byte packing. The same mechanism would carry `onError`; that stays open because the platform layers have no error channel (`docs/parity.md`). What no CI run shows is audio on a device.
+
+The first version of this surface refused a stream output with `ERR_MICROPHONE_INVALID_ARGUMENT`, because the build then targeted NSH 0.4.0 and no chunk callback had been verified.
+
+### Amplitude and state events: the crate polls, the platform does not push
+
+`onStateChanged` is a listener list on the recorder's gate, fired after each change outside the lock. `onAmplitudeChanged` reads `amplitude()` on a timer: no platform layer meters on its own schedule, so a push would only move the timer into each layer. A Rust call needs an NSH owner (it spawns a task), and the TSX one uses `setInterval`.
 
 ### No demo app; the status page is the extra
 
