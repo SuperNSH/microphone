@@ -5,6 +5,9 @@ import { rustBackend } from "./rust";
 
 export type RecordingState = "idle" | "recording" | "paused";
 
+/** The shortest gap between two amplitude reads, as the Rust crate keeps it: zero would spin. */
+const MIN_AMPLITUDE_INTERVAL_MS = 10;
+
 /** A config with every default filled in, as `start` hands it to the backend. */
 type ResolvedConfig = Required<RecordConfig>;
 
@@ -47,6 +50,7 @@ export class Recorder {
   private disposed = false;
   private generation = 0;
   private stopSettler: ((error: RecorderError) => void) | null = null;
+  private readonly stateListeners = new Set<(state: RecordingState) => void>();
 
   constructor(options: { backend?: RecorderBackend } = {}) {
     this.backend = options.backend ?? rustBackend();
@@ -62,6 +66,56 @@ export class Recorder {
 
   isPaused(): boolean {
     return this.current === "paused";
+  }
+
+  /**
+   * Calls `listener` after each change of `state()`, with the new state: `record`'s
+   * `onStateChanged`. It hears changes only, not the state it joins at. Returns the function that
+   * stops listening.
+   */
+  onStateChanged(listener: (state: RecordingState) => void): () => void {
+    // A fresh closure per call, so two subscriptions of one function stop separately.
+    const entry = (state: RecordingState) => listener(state);
+    this.stateListeners.add(entry);
+    return () => {
+      this.stateListeners.delete(entry);
+    };
+  }
+
+  /**
+   * Calls `listener` with the loudness every `intervalMs` while a recording runs or is paused:
+   * `record`'s `onAmplitudeChanged`. It stays quiet between recordings and ends with `dispose()`;
+   * an interval under 10 ms is raised to 10 ms. Returns the function that stops listening.
+   */
+  onAmplitudeChanged(intervalMs: number, listener: (amplitude: Amplitude) => void): () => void {
+    const every = Math.max(MIN_AMPLITUDE_INTERVAL_MS, Number.isFinite(intervalMs) ? intervalMs : 0);
+    let live = true;
+    // A slow read is not asked again until it answers, so answers arrive in order.
+    let reading = false;
+    const stop = () => {
+      live = false;
+      clearInterval(timer);
+    };
+    const timer = setInterval(() => {
+      if (this.disposed) {
+        stop();
+        return;
+      }
+      if (this.current === "idle" || reading) return;
+      reading = true;
+      this.amplitude().then(
+        (amplitude) => {
+          reading = false;
+          // A stop may have ended the recording while the platform answered.
+          if (live && this.current !== "idle") listener(amplitude);
+        },
+        () => {
+          // A read the platform failed: the next tick asks again.
+          reading = false;
+        },
+      );
+    }, every);
+    return stop;
   }
 
   async checkPermissions(): Promise<PermissionState> {
@@ -115,7 +169,7 @@ export class Recorder {
     if (this.disposed) throw recorderError("ERR_MICROPHONE_NOT_AVAILABLE");
     if (this.busy) throw recorderError("ERR_MICROPHONE_IN_PROGRESS");
     this.busy = true;
-    this.current = "recording";
+    this.setState("recording");
     let supported: boolean;
     try {
       supported = await this.backend.isEncoderSupported(resolved.encoder);
@@ -162,7 +216,7 @@ export class Recorder {
       throw asRecorderError(error);
     }
     // A cancel or a finished stop may have ended the recording while the backend paused it.
-    if (this.generation === attempt && this.current === "recording") this.current = "paused";
+    if (this.generation === attempt && this.current === "recording") this.setState("paused");
   }
 
   /** Resumes a paused recording. */
@@ -175,7 +229,7 @@ export class Recorder {
     } catch (error) {
       throw asRecorderError(error);
     }
-    if (this.generation === attempt && this.current === "paused") this.current = "recording";
+    if (this.generation === attempt && this.current === "paused") this.setState("recording");
   }
 
   /** The loudness of the running or paused recording. */
@@ -217,8 +271,8 @@ export class Recorder {
           // A cancel or dispose already ended this recording; its late answer settles nothing.
           if (this.generation !== attempt) return;
           this.stopping = false;
-          this.current = "idle";
           this.busy = false;
+          this.setState("idle");
           settle({ ok: true, recording });
         },
         (error: unknown) => {
@@ -284,8 +338,21 @@ export class Recorder {
 
   /** Frees a gate a failing start claimed; a running recording ends through abort(). */
   private releaseGate(): void {
-    this.current = "idle";
     this.busy = false;
+    this.setState("idle");
+  }
+
+  /** Moves to `next` and tells the listeners once. One that throws cannot reject the call that moved the state. */
+  private setState(next: RecordingState): void {
+    if (this.current === next) return;
+    this.current = next;
+    for (const listener of [...this.stateListeners]) {
+      try {
+        listener(next);
+      } catch {
+        // The listener's failure is its own.
+      }
+    }
   }
 
   /** Ends the session at once: frees the gate and settles a pending stop as cancelled. */
@@ -294,8 +361,8 @@ export class Recorder {
     const settle = this.stopSettler;
     this.stopSettler = null;
     this.stopping = false;
-    this.current = "idle";
     this.busy = false;
+    this.setState("idle");
     settle?.(recorderError("ERR_MICROPHONE_CANCELLED"));
   }
 }

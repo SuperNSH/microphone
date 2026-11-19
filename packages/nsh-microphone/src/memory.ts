@@ -22,6 +22,8 @@ export interface MemoryRecorder extends RecorderBackend {
   holdStop(): void;
   /** Answers the held stop: its recording, or a code to reject with. False when nothing is held. */
   finishStop(result: StoppedRecording | RecorderErrorCode): boolean;
+  /** Sets the loudness `amplitude` answers. Defaults to silence. */
+  setAmplitude(level: Amplitude): void;
   /** Delivers the chunk while a recording runs; paused recordings drop it. Says which happened. */
   pushChunk(chunk: AudioChunk): boolean;
   recording(): boolean;
@@ -40,6 +42,7 @@ export function memoryBackend(config: MemoryRecorderConfig = {}): MemoryRecorder
   let permission = config.permission ?? "granted";
   let devices: InputDevice[] = config.devices ?? [{ id: "built-in-mic", label: "Built-in microphone" }];
   let encoderSupported = config.encoderSupported ?? true;
+  let level: Amplitude = { average: 0, peak: 0 };
   let failStart: RecorderErrorCode | null = null;
   let holdArmed = false;
   let heldStop: ((result: StoppedRecording | RecorderErrorCode) => void) | null = null;
@@ -89,7 +92,7 @@ export function memoryBackend(config: MemoryRecorderConfig = {}): MemoryRecorder
       resumeCount += 1;
       paused = false;
     },
-    amplitude: async (): Promise<Amplitude> => ({ average: 0, peak: 0 }),
+    amplitude: async (): Promise<Amplitude> => ({ ...level }),
     stop: () => {
       stopCount += 1;
       endSession();
@@ -112,6 +115,9 @@ export function memoryBackend(config: MemoryRecorderConfig = {}): MemoryRecorder
     dispose: async () => {
       disposalCount += 1;
       endSession();
+    },
+    setAmplitude: (next) => {
+      level = { ...next };
     },
     setPermission: (state) => {
       permission = state;

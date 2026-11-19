@@ -34,6 +34,7 @@ struct FakeState {
     next_pause_error: Option<RecorderError>,
     next_resume_error: Option<RecorderError>,
     next_amplitude_error: Option<RecorderError>,
+    amplitude: Amplitude,
     next_stop_error: Option<RecorderError>,
     next_cancel_error: Option<RecorderError>,
     next_dispose_error: Option<RecorderError>,
@@ -75,6 +76,7 @@ impl FakeBackend {
                 next_pause_error: None,
                 next_resume_error: None,
                 next_amplitude_error: None,
+                amplitude: Amplitude::default(),
                 next_stop_error: None,
                 next_cancel_error: None,
                 next_dispose_error: None,
@@ -132,6 +134,11 @@ impl FakeBackend {
     /// Makes the next resume fail with `error`.
     pub fn fail_next_resume(&self, error: RecorderError) {
         self.lock().next_resume_error = Some(error);
+    }
+
+    /// Sets the loudness `amplitude` answers while a recording runs.
+    pub fn set_amplitude(&self, amplitude: Amplitude) {
+        self.lock().amplitude = amplitude;
     }
 
     /// Makes the next amplitude fail with `error`.
@@ -298,10 +305,8 @@ impl Backend for FakeBackend {
     fn amplitude(&self) -> BackendFuture<'_, Result<Amplitude, RecorderError>> {
         let answer = {
             let mut state = self.lock();
-            state
-                .next_amplitude_error
-                .take()
-                .map_or(Ok(Amplitude::default()), Err)
+            let level = state.amplitude;
+            state.next_amplitude_error.take().map_or(Ok(level), Err)
         };
         Box::pin(ready(answer))
     }

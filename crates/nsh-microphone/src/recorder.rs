@@ -5,8 +5,10 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
     task::{Context, Poll},
+    time::Duration,
 };
 
+use nsh_core::prelude::{spawn, timer};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -29,6 +31,9 @@ pub enum RecordingState {
     Paused,
 }
 
+/// Hears every change of [`RecordingState`]; it may fire from any thread a call runs on.
+type StateListener = Arc<dyn Fn(RecordingState) + Send + Sync>;
+
 /// The recording that owns the gate. `generation` names it, so a late platform answer for a
 /// cancelled recording cannot touch a newer one.
 struct Active {
@@ -45,6 +50,20 @@ struct Gate {
     recording: Option<Active>,
     stop_waiting: Option<oneshot::Sender<RecorderError>>,
     disposed: bool,
+    next_listener: u64,
+    listeners: Vec<(u64, StateListener)>,
+    /// The state the listeners last heard, so each change is announced once.
+    announced: RecordingState,
+}
+
+impl Gate {
+    fn state(&self) -> RecordingState {
+        match self.recording.as_ref() {
+            None => RecordingState::Idle,
+            Some(active) if active.paused => RecordingState::Paused,
+            Some(_) => RecordingState::Recording,
+        }
+    }
 }
 
 struct Shared {
@@ -64,9 +83,34 @@ impl Shared {
 
     /// Frees the gate when `generation` still owns it; a newer owner is never touched.
     fn release(&self, generation: u64) {
-        let mut gate = self.gate();
-        if matches!(&gate.recording, Some(active) if active.generation == generation) {
-            gate.recording = None;
+        {
+            let mut gate = self.gate();
+            if matches!(&gate.recording, Some(active) if active.generation == generation) {
+                gate.recording = None;
+            }
+        }
+        self.announce();
+    }
+
+    /// Tells the state listeners about a change of state since they last heard. They run
+    /// outside the lock, so one may read the recorder back.
+    fn announce(&self) {
+        let (state, listeners) = {
+            let mut gate = self.gate();
+            let state = gate.state();
+            if state == gate.announced {
+                return;
+            }
+            gate.announced = state;
+            let listeners: Vec<StateListener> = gate
+                .listeners
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect();
+            (state, listeners)
+        };
+        for listener in listeners {
+            listener(state);
         }
     }
 
@@ -114,11 +158,46 @@ impl Recorder {
 
     /// Where the recording stands.
     pub fn state(&self) -> RecordingState {
-        match self.shared.gate().recording.as_ref() {
-            None => RecordingState::Idle,
-            Some(active) if active.paused => RecordingState::Paused,
-            Some(_) => RecordingState::Recording,
-        }
+        self.shared.gate().state()
+    }
+
+    /// Calls `listener` after each change of [`Recorder::state`], with the new state: `record`'s
+    /// `onStateChanged`. It hears changes only, not the state it joins at, and it may run on
+    /// whichever thread made the call that changed the state. Dropping the returned
+    /// [`Subscription`] ends it.
+    pub fn on_state_changed(
+        &self,
+        listener: impl Fn(RecordingState) + Send + Sync + 'static,
+    ) -> Subscription {
+        let id = {
+            let mut gate = self.shared.gate();
+            let id = gate.next_listener;
+            gate.next_listener += 1;
+            gate.listeners.push((id, Arc::new(listener)));
+            id
+        };
+        let shared = Arc::clone(&self.shared);
+        Subscription::new(move || {
+            shared
+                .gate()
+                .listeners
+                .retain(|(listener, _)| *listener != id);
+        })
+    }
+
+    /// Calls `listener` with the recording's [`Amplitude`] every `interval` while it records or
+    /// is paused: `record`'s `onAmplitudeChanged`. It idles between recordings and ends with
+    /// the handle's dispose. An interval under 10 ms is raised to 10 ms. It runs as a task of the
+    /// current owner, so call it where a component or an effect runs; dropping the returned
+    /// [`Subscription`] or the owner ends it.
+    pub fn on_amplitude_changed(
+        &self,
+        interval: Duration,
+        listener: impl Fn(Amplitude) + 'static,
+    ) -> Subscription {
+        let recorder = self.clone();
+        let task = spawn(poll_amplitude(recorder, interval.max(MIN_POLL), listener));
+        Subscription::new(move || drop(task))
     }
 
     /// Whether a recording delivers chunks.
@@ -207,6 +286,7 @@ impl Recorder {
                 });
                 generation
             };
+            self.shared.announce();
             let supported = match self
                 .shared
                 .backend
@@ -264,6 +344,8 @@ impl Recorder {
                 active.paused = true;
             }
         }
+        drop(gate);
+        self.shared.announce();
         Ok(())
     }
 
@@ -290,6 +372,8 @@ impl Recorder {
         {
             active.paused = false;
         }
+        drop(gate);
+        self.shared.announce();
         Ok(())
     }
 
@@ -354,6 +438,7 @@ impl Recorder {
                         }
                     };
                     if still_ours {
+                        self.shared.announce();
                         answer
                     } else {
                         Err(self.shared.lost_claim())
@@ -383,6 +468,7 @@ impl Recorder {
             if let Some(sender) = waiting {
                 let _ = sender.send(RecorderError::new(ErrorKind::Cancelled));
             }
+            self.shared.announce();
             self.shared.backend.cancel().await
         })
     }
@@ -402,6 +488,7 @@ impl Recorder {
                 }
                 gate.recording.take().is_some()
             };
+            self.shared.announce();
             // The backend's dispose must run once even when its cancel fails.
             let cancel_error = if recording {
                 self.shared.backend.cancel().await.err()
@@ -413,6 +500,56 @@ impl Recorder {
                 (None, answer) => answer,
             }
         })
+    }
+}
+
+/// A listener's registration. Dropping it, or [`Subscription::stop`], ends the listening.
+#[must_use = "a dropped subscription stops listening at once"]
+pub struct Subscription {
+    end: Option<Box<dyn FnOnce()>>,
+}
+
+impl Subscription {
+    fn new(end: impl FnOnce() + 'static) -> Self {
+        Self {
+            end: Some(Box::new(end)),
+        }
+    }
+
+    /// Ends the listening now.
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(end) = self.end.take() {
+            end();
+        }
+    }
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Subscription")
+    }
+}
+
+/// The shortest gap between two amplitude reads: a zero interval would spin the engine.
+const MIN_POLL: Duration = Duration::from_millis(10);
+
+/// Reads the amplitude every `interval`. A tick with no recording running says nothing, and the
+/// task ends when the handle is disposed.
+async fn poll_amplitude(recorder: Recorder, interval: Duration, listener: impl Fn(Amplitude)) {
+    loop {
+        timer(interval).await;
+        match recorder.amplitude().await {
+            Ok(amplitude) => listener(amplitude),
+            Err(error) if error.kind() == ErrorKind::NotAvailable => return,
+            // Idle, or a read the platform failed: the next tick asks again.
+            Err(_) => {}
+        }
     }
 }
 

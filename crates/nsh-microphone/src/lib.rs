@@ -24,7 +24,7 @@ pub use options::{
     Amplitude, AudioChunk, Encoder, InputDevice, Output, PermissionState, RecordConfig,
     StoppedRecording,
 };
-pub use recorder::{Recorder, RecordingState};
+pub use recorder::{Recorder, RecordingState, Subscription};
 
 /// The crate's UI set: what TSX imports from `nsh-microphone/native`.
 #[native_module("nsh-microphone/native")]
