@@ -26,12 +26,6 @@ export interface UseMicrophoneAvailabilityOptions {
   recorder?: Recorder;
 }
 
-// NSH 0.4.0's web runtime ships no `lifecycle` accessor: the import stays `undefined` there.
-// Treat that as active, so the first read still runs; the foreground re-check comes back with an NSH release that has it.
-function lifecycleState(): "active" | "inactive" | "background" {
-  return typeof lifecycle === "function" ? lifecycle() : "active";
-}
-
 /**
  * Reads what the device can do, as a reactive value. A binding on `state()` runs again only when
  * the answer changes. The read ends when the component goes.
@@ -67,7 +61,7 @@ export function useMicrophoneAvailability(
   };
 
   effect(() => {
-    if (lifecycleState() === "active") check();
+    if (lifecycle() === "active") check();
   });
   cleanup(() => {
     gone = true;
