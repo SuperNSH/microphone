@@ -1,0 +1,8 @@
+{
+  "nsh": ">=0.6",
+  "exports": {
+    "nsh-microphone": "tsx/index.ts",
+    "nsh-microphone/rust": "tsx/rust.ts",
+    "nsh-microphone/memory": "tsx/memory.ts"
+  }
+}

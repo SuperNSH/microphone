@@ -4,6 +4,18 @@ Recording to file or stream for voice notes and level meters. Not speech-to-text
 
 Part of the Native Shell (NSH) capability set. Same layout as the other SuperNSH repos: a Rust crate and a TypeScript package, docs in `docs/`, CI on GitHub Actions, and a web status page on GitHub Pages at https://supernsh.github.io/microphone/.
 
+## Install
+
+In the app's directory:
+
+```sh
+nsh add nsh-microphone
+```
+
+`nsh add` needs NSH main or the nightly: the 0.6.0 and 0.6.1 releases do not have it. In a Rust app, `cargo add nsh-microphone` works with any of them.
+
+In TSX, import from `nsh-microphone`, `nsh-microphone/rust` and `nsh-microphone/memory`.
+
 ## Status
 
 **Verified by CI.** Run https://github.com/SuperNSH/microphone/actions/runs/44381766793 passed every job on master: format, rust (Linux, macOS, Windows), cross-check (iOS, iOS simulator, Android, wasm) and typescript. The platform layers are compiled and linted there but not run on devices. Added since that run and unverified until a run passes them: `onStateChanged` and `onAmplitudeChanged` in Rust and TypeScript, and chunk streaming over the native bridge (`NativeRecorder.onChunk`); the rows are marked Unverified in docs/parity.md. Not implemented: detecting a revoked permission that yields silence (see docs/parity.md).
