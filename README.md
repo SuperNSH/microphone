@@ -12,7 +12,7 @@ In the app's directory:
 nsh add nsh-microphone
 ```
 
-`nsh add` needs NSH main or the nightly: the 0.6.0 and 0.6.1 releases do not have it. In a Rust app, `cargo add nsh-microphone` works with any of them.
+`nsh add` needs NSH 0.7.0 or later: the 0.6.0 and 0.6.1 releases do not have it. In a Rust app, `cargo add nsh-microphone` pulls in nsh-core 0.7.
 
 In TSX, import from `nsh-microphone`, `nsh-microphone/rust` and `nsh-microphone/memory`.
 

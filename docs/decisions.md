@@ -4,9 +4,9 @@ Each entry says what was chosen and why. `docs/parity.md` lists what each API do
 
 ## Decided
 
-### NSH 0.6.0
+### NSH 0.7.1
 
-The build targets NSH 0.6.0, the release CI installs (`NSH_VERSION: v0.6.0` from SuperNSH/nsh-builds). It moved from 0.4.0 on 2026-11-12 with no source change, and to 0.5.1, a bug-fix release with no API changes, on 2026-11-17, and to 0.6.0 on 2026-11-18. The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. API names are read from the published `v0.6.0` sources; NSH's HEAD is never used as an API reference.
+The build targets NSH 0.7.1, the release CI installs (`NSH_VERSION: v0.7.1` from SuperNSH/nsh-builds). It moved from 0.4.0 on 2026-11-12 with no source change, and to 0.5.1, a bug-fix release with no API changes, on 2026-11-17, to 0.6.0 on 2026-11-18, and to 0.7.1 on 2026-11-25. The nsh-core, nsh-engine and nsh-testing versions were verified on crates.io. API names are read from the published `v0.7.1` sources; NSH's HEAD is never used as an API reference.
 
 ### cpal on Windows and Linux, the AVAudioEngine tap on every Apple target
 
