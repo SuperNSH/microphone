@@ -26,6 +26,7 @@ cpal = "0.18.2"
 objc2 = { version = "0.6", features = ["std"] }
 block2 = { version = "0.6", features = ["std"] }
 objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "alloc", "AVAudioApplication", "AVAudioBuffer", "AVAudioEngine", "AVAudioFile", "AVAudioFormat", "AVAudioIONode", "AVAudioMixing", "AVAudioNode", "AVAudioSession", "AVAudioSessionRoute", "AVAudioSessionTypes", "AVAudioSettings", "AVAudioTypes", "AVAudioTime"] }
+objc2-foundation = "0.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"

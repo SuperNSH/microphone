@@ -8,11 +8,12 @@ use std::{
 };
 
 use block2::RcBlock;
-use objc2::{msg_send, rc::Retained};
+use objc2::{msg_send, rc::Retained, sel};
 use objc2_avf_audio::{
     AVAudioEngine, AVAudioFormat, AVAudioFrameCount, AVAudioInputNode, AVAudioNodeBus,
     AVAudioPCMBuffer, AVAudioTime,
 };
+use objc2_foundation::NSError;
 
 use super::write_wav;
 use crate::{
@@ -306,14 +307,34 @@ fn install_tap(node: &AVAudioInputNode, format: &AVAudioFormat, tap: Arc<Mutex<T
     );
     // SAFETY: the selector and block signature match AVAudioNodeTapBlock; the format is the
     // node's own, which the engine accepts for an input tap.
-    unsafe {
-        let _: () = msg_send![
-            node,
-            installTapOnBus: BUS,
-            bufferSize: TAP_FRAMES,
-            format: format,
-            usingBlock: &*block
-        ];
+
+    let new_sel = sel!(installTapOnBus:bufferSize:format:error:block:);
+    // let old_sel = sel!(installTapOnBus:bufferSize:format:usingBlock:);
+    let has_new_api: bool = unsafe { msg_send![node, respondsToSelector: new_sel] };
+    // let has_old_api: bool = unsafe { msg_send![node, respondsToSelector: old_sel] };
+
+    if has_new_api {
+        let mut error: *mut NSError = std::ptr::null_mut();
+        unsafe {
+            let _: () = msg_send![
+                node,
+                installTapOnBus: BUS,
+                bufferSize: TAP_FRAMES,
+                format: format,
+                error: &mut error as *mut *mut NSError,
+                block: &*block
+            ];
+        }
+    } else {
+        unsafe {
+            let _: () = msg_send![
+                node,
+                installTapOnBus: BUS,
+                bufferSize: TAP_FRAMES,
+                format: format,
+                usingBlock: &*block
+            ];
+        }
     }
 }
 
